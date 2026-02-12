@@ -49,6 +49,16 @@ public partial class Main : Node3D
 	[Export] public float GrassWindStrength { get; set; } = 1.0f;
 	[Export] public float GrassAlphaCutoff { get; set; } = 0.40f;
 	[Export] public float GrassDensityScale { get; set; } = 1.5f;
+	[ExportGroup("Fog & Culling")]
+	[Export] public bool EnableDistanceFogAndObjectCulling { get; set; } = true;
+	[Export] public float FogAndCullingDistance { get; set; } = 52f; // Object culling distance.
+	[Export] public float FogStartDistance { get; set; } = 44f;       // Fog begins here.
+	[Export] public float FogOpaqueBeforeCullMargin { get; set; } = 1.5f; // Fog reaches full strength before culling.
+	[Export] public float FogDensityCurve { get; set; } = 3.2f;         // Higher = stronger fog near the end.
+	[Export] public float FogMaxDensity { get; set; } = 0.88f;          // Depth fog max opacity.
+	[Export] public float ObjectCullingHysteresis { get; set; } = 2f;   // Reduces edge popping while moving.
+	[Export] public float ObjectCullingRefreshInterval { get; set; } = 0.10f;
+	[Export] public Color DistanceFogColor { get; set; } = new Color(0.58f, 0.64f, 0.72f, 1f);
 	[ExportGroup("Audio")]
 	[Export] public bool EnableWorldAudio { get; set; } = true;
 	[Export] public bool PlayAudioInEditor { get; set; } = false;
@@ -87,6 +97,11 @@ public partial class Main : Node3D
 	private MuGrassRenderer? _grassRenderer;
 	private LorenciaLeafParticleSystem? _lorenciaLeafSystem;
 	private LorenciaBirdSystem? _lorenciaBirdSystem;
+	private WorldEnvironment? _worldEnvironment;
+	private Godot.Environment? _sceneEnvironment;
+	private HashSet<string>? _sceneEnvironmentProperties;
+	private readonly List<MeshInstance3D> _distanceCulledObjectInstances = new();
+	private readonly List<MuAnimatedMeshController> _distanceCulledAnimationControllers = new();
 	private AudioStreamPlayer? _musicPlayer;
 	private AudioStreamPlayer? _ambientPlayer;
 	private readonly Dictionary<string, AudioStream?> _audioCache = new(StringComparer.OrdinalIgnoreCase);
@@ -98,6 +113,8 @@ public partial class Main : Node3D
 	private bool _loading;
 	private float _editorOwnerSyncTimer;
 	private float _editorFxUpdateAccumulator;
+	private float _objectCullingTimer;
+	private bool _distanceCullingResetPending = true;
 
 	public override void _Ready()
 	{
@@ -125,6 +142,8 @@ public partial class Main : Node3D
 			AddChild(_sun);
 		}
 		ApplyMonoGameLightingDefaults();
+		EnsureWorldEnvironment();
+		ConfigureDistanceFog();
 
 		// Setup container nodes
 		_terrainRoot = GetNodeOrNull<Node3D>("Terrain") ?? new Node3D { Name = "Terrain" };
@@ -198,6 +217,10 @@ public partial class Main : Node3D
 			_grassRenderer?.Clear();
 			_lorenciaLeafSystem?.Clear();
 			_lorenciaBirdSystem?.Clear();
+			_distanceCulledObjectInstances.Clear();
+			_distanceCulledAnimationControllers.Clear();
+			_objectCullingTimer = 0f;
+			_distanceCullingResetPending = true;
 			ClearChildren(_terrainRoot);
 			ClearChildren(_objectsRoot);
 			StopWorldAudio();
@@ -239,8 +262,13 @@ public partial class Main : Node3D
 					_objectsRoot,
 					enableAnimations: enableObjectAnimations,
 					assignEditorOwnership: assignOwnership);
+				RebuildObjectDistanceCullingCaches();
 				if (FullObjectOwnershipPassInEditor)
 					ExposeGeneratedNodesInEditor(_objectsRoot);
+			}
+			else
+			{
+				RebuildObjectDistanceCullingCaches();
 			}
 
 			await ConfigureWorldAmbientSystemsAsync(WorldIndex);
@@ -276,20 +304,8 @@ public partial class Main : Node3D
 		_terrainBuilder.WaterCrossUvSpeed = 0.008f;
 		_terrainBuilder.WaterCrossUvBlend = 0.42f;
 		_terrainBuilder.WaterCrestStrength = 0.06f;
-		_terrainBuilder.GerstnerStrength = 0f;
-		_terrainBuilder.GerstnerSteepness = 0.7f;
-		_terrainBuilder.GerstnerDirectionA = new Vector2(1f, 0.2f);
-		_terrainBuilder.GerstnerDirectionB = new Vector2(0.35f, 1f);
-		_terrainBuilder.GerstnerDirectionC = new Vector2(-0.75f, 0.5f);
-		_terrainBuilder.GerstnerAmplitudeA = 0.03f;
-		_terrainBuilder.GerstnerAmplitudeB = 0.018f;
-		_terrainBuilder.GerstnerAmplitudeC = 0.012f;
-		_terrainBuilder.GerstnerWavelengthA = 3.6f;
-		_terrainBuilder.GerstnerWavelengthB = 2.1f;
-		_terrainBuilder.GerstnerWavelengthC = 1.3f;
-		_terrainBuilder.GerstnerSpeedA = 2.1f;
-		_terrainBuilder.GerstnerSpeedB = 1.55f;
-		_terrainBuilder.GerstnerSpeedC = 2.9f;
+		_terrainBuilder.WaterSurfaceLift = 0f;
+		_terrainBuilder.WaterEdgeExpand = 0.00f;
 		_terrainBuilder.WaterTint = new Vector3(0.84f, 0.97f, 1.08f);
 		_terrainBuilder.WaterFresnelColor = new Vector3(0.34f, 0.56f, 0.72f);
 		_terrainBuilder.WaterFresnelStrength = 0.26f;
@@ -301,23 +317,14 @@ public partial class Main : Node3D
 		{
 			_terrainBuilder.WaterFlowDirection = new Vector2(1f, 0.18f).Normalized();
 			_terrainBuilder.WaterSpeed = 0.26f;
-			_terrainBuilder.DistortionAmplitude = 0.052f;
+			_terrainBuilder.DistortionAmplitude = 0.032f;
 			_terrainBuilder.DistortionFrequency = 1.05f;
 			_terrainBuilder.WaterUvSpeed = 0.068f;
 			_terrainBuilder.WaterCrossUvSpeed = 0.038f;
 			_terrainBuilder.WaterCrossUvBlend = 0.50f;
 			_terrainBuilder.WaterCrestStrength = 0.045f;
-			_terrainBuilder.GerstnerStrength = 1.35f;
-			_terrainBuilder.GerstnerSteepness = 1.08f;
-			_terrainBuilder.GerstnerAmplitudeA = 0.095f;
-			_terrainBuilder.GerstnerAmplitudeB = 0.055f;
-			_terrainBuilder.GerstnerAmplitudeC = 0.035f;
-			_terrainBuilder.GerstnerWavelengthA = 7.0f;
-			_terrainBuilder.GerstnerWavelengthB = 4.4f;
-			_terrainBuilder.GerstnerWavelengthC = 2.6f;
-			_terrainBuilder.GerstnerSpeedA = 2.8f;
-			_terrainBuilder.GerstnerSpeedB = 2.0f;
-			_terrainBuilder.GerstnerSpeedC = 3.6f;
+			_terrainBuilder.WaterSurfaceLift = 0.03f;
+			_terrainBuilder.WaterEdgeExpand = 0.0f;
 			_terrainBuilder.WaterTint = new Vector3(0.23f, 0.34f, 0.48f);
 			_terrainBuilder.WaterFresnelColor = new Vector3(0.10f, 0.18f, 0.28f);
 			_terrainBuilder.WaterFresnelStrength = 0.07f;
@@ -460,6 +467,7 @@ public partial class Main : Node3D
 
 		bool isEditor = Engine.IsEditorHint();
 		Vector3 cameraPosition = GetGrassCameraPosition();
+		UpdateDistanceFogAndObjectCulling(delta, cameraPosition);
 
 		if (_terrainBuilder != null)
 			_terrainBuilder.Update(delta);
@@ -544,6 +552,186 @@ public partial class Main : Node3D
 			return _camera.GlobalPosition;
 
 		return Vector3.Zero;
+	}
+
+	private void EnsureWorldEnvironment()
+	{
+		if (_worldEnvironment != null && GodotObject.IsInstanceValid(_worldEnvironment) &&
+			_sceneEnvironment != null && _sceneEnvironmentProperties != null)
+		{
+			return;
+		}
+
+		_worldEnvironment = GetNodeOrNull<WorldEnvironment>("WorldEnvironment");
+		if (_worldEnvironment == null)
+		{
+			_worldEnvironment = new WorldEnvironment { Name = "WorldEnvironment" };
+			AddChild(_worldEnvironment);
+		}
+
+		_sceneEnvironment = _worldEnvironment.Environment;
+		if (_sceneEnvironment == null)
+		{
+			_sceneEnvironment = new Godot.Environment();
+			_worldEnvironment.Environment = _sceneEnvironment;
+		}
+
+		_sceneEnvironmentProperties = BuildPropertyNameSet(_sceneEnvironment);
+	}
+
+	private void ConfigureDistanceFog()
+	{
+		EnsureWorldEnvironment();
+		if (_sceneEnvironment == null)
+			return;
+
+		bool enabled = EnableDistanceFogAndObjectCulling;
+		_sceneEnvironment.FogEnabled = enabled;
+		_sceneEnvironment.VolumetricFogEnabled = false;
+		if (!enabled)
+			return;
+
+		float cullDistance = MathF.Max(10f, FogAndCullingDistance);
+		float fogStart = Mathf.Clamp(FogStartDistance, 1f, cullDistance - 1f);
+		float fogEnd = MathF.Max(
+			fogStart + 1f,
+			cullDistance - MathF.Max(0.5f, FogOpaqueBeforeCullMargin));
+
+		_sceneEnvironment.FogMode = Godot.Environment.FogModeEnum.Depth;
+		_sceneEnvironment.FogLightColor = DistanceFogColor;
+		_sceneEnvironment.FogLightEnergy = 1.10f;
+		_sceneEnvironment.FogSkyAffect = 1f;
+		_sceneEnvironment.FogAerialPerspective = 0f;
+		_sceneEnvironment.FogSunScatter = 0f;
+		_sceneEnvironment.FogDensity = Mathf.Clamp(FogMaxDensity, 0f, 1f);
+		_sceneEnvironment.FogHeightDensity = 0f;
+		_sceneEnvironment.FogDepthBegin = fogStart;
+		_sceneEnvironment.FogDepthEnd = fogEnd;
+		_sceneEnvironment.FogDepthCurve = Mathf.Clamp(FogDensityCurve, 1f, 8f);
+	}
+
+	private void UpdateDistanceFogAndObjectCulling(double delta, Vector3 cameraPosition)
+	{
+		ConfigureDistanceFog();
+
+		if (!EnableDistanceFogAndObjectCulling)
+		{
+			if (_distanceCullingResetPending)
+				ResetObjectDistanceCulling();
+			return;
+		}
+
+		_distanceCullingResetPending = true;
+		_objectCullingTimer += (float)delta;
+		float refresh = Mathf.Clamp(ObjectCullingRefreshInterval, 0.05f, 1.0f);
+		if (_objectCullingTimer < refresh)
+			return;
+
+		_objectCullingTimer = 0f;
+		float maxDistance = MathF.Max(10f, FogAndCullingDistance);
+		float maxDistanceSq = maxDistance * maxDistance;
+		float hysteresis = MathF.Max(0f, ObjectCullingHysteresis);
+		float showDistance = MathF.Max(1f, maxDistance - hysteresis);
+		float showDistanceSq = showDistance * showDistance;
+
+		for (int i = 0; i < _distanceCulledObjectInstances.Count; i++)
+		{
+			var mesh = _distanceCulledObjectInstances[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			float distSq = mesh.GlobalPosition.DistanceSquaredTo(cameraPosition);
+			bool visible = mesh.Visible
+				? distSq <= maxDistanceSq
+				: distSq <= showDistanceSq;
+			if (mesh.Visible != visible)
+				mesh.Visible = visible;
+		}
+
+		for (int i = 0; i < _distanceCulledAnimationControllers.Count; i++)
+		{
+			var controller = _distanceCulledAnimationControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			bool animate = controller.HasAnyVisibleTargetWithinDistance(cameraPosition, maxDistanceSq);
+			controller.SetExternalAnimationEnabled(animate);
+		}
+	}
+
+	private void RebuildObjectDistanceCullingCaches()
+	{
+		_distanceCulledObjectInstances.Clear();
+		_distanceCulledAnimationControllers.Clear();
+
+		if (_objectsRoot == null || !GodotObject.IsInstanceValid(_objectsRoot))
+			return;
+
+		foreach (Node child in _objectsRoot.GetChildren())
+		{
+			if (child is MeshInstance3D mesh &&
+				mesh.Name.ToString().StartsWith("Obj_", StringComparison.Ordinal))
+			{
+				_distanceCulledObjectInstances.Add(mesh);
+				continue;
+			}
+
+			if (child is MuAnimatedMeshController controller)
+				_distanceCulledAnimationControllers.Add(controller);
+		}
+	}
+
+	private void ResetObjectDistanceCulling()
+	{
+		for (int i = 0; i < _distanceCulledObjectInstances.Count; i++)
+		{
+			var mesh = _distanceCulledObjectInstances[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (!mesh.Visible)
+				mesh.Visible = true;
+		}
+
+		for (int i = 0; i < _distanceCulledAnimationControllers.Count; i++)
+		{
+			var controller = _distanceCulledAnimationControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			controller.SetExternalAnimationEnabled(true);
+		}
+
+		_distanceCullingResetPending = false;
+	}
+
+	private void SetEnvironmentPropertyIfExists(string propertyName, Variant value)
+	{
+		if (_sceneEnvironment == null || _sceneEnvironmentProperties == null)
+			return;
+
+		if (!_sceneEnvironmentProperties.Contains(propertyName))
+			return;
+
+		_sceneEnvironment.Set(propertyName, value);
+	}
+
+	private static HashSet<string> BuildPropertyNameSet(GodotObject obj)
+	{
+		var names = new HashSet<string>(StringComparer.Ordinal);
+		var properties = obj.GetPropertyList();
+		for (int i = 0; i < properties.Count; i++)
+		{
+			var property = properties[i];
+			if (!property.ContainsKey("name"))
+				continue;
+
+			string name = property["name"].ToString();
+			if (!string.IsNullOrWhiteSpace(name))
+				names.Add(name);
+		}
+
+		return names;
 	}
 
 	public override void _ExitTree()

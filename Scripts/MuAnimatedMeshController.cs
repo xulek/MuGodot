@@ -25,6 +25,7 @@ public partial class MuAnimatedMeshController : Node
     private float _startFrame;
     private float _startTimeSeconds;
     private float _framePos;
+    private bool _externalAnimationEnabled = true;
 
     public void Initialize(
         MuModelBuilder modelBuilder,
@@ -70,7 +71,7 @@ public partial class MuAnimatedMeshController : Node
                 break;
             }
         }
-        SetProcess(_frameCount > 1);
+        RefreshProcessState();
     }
 
     public void RegisterInstance(MeshInstance3D instance)
@@ -95,6 +96,33 @@ public partial class MuAnimatedMeshController : Node
                 return _frames[i];
 
         return null;
+    }
+
+    public void SetExternalAnimationEnabled(bool enabled)
+    {
+        if (_externalAnimationEnabled == enabled)
+            return;
+
+        _externalAnimationEnabled = enabled;
+        RefreshProcessState();
+    }
+
+    public bool HasAnyVisibleTargetWithinDistance(Vector3 cameraPosition, float maxDistanceSq)
+    {
+        if (_targets.Count == 0)
+            return false;
+
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            var target = _targets[i];
+            if (target == null || !IsInstanceValid(target) || !target.Visible)
+                continue;
+
+            if (target.GlobalPosition.DistanceSquaredTo(cameraPosition) <= maxDistanceSq)
+                return true;
+        }
+
+        return false;
     }
 
     public override void _Process(double delta)
@@ -124,6 +152,11 @@ public partial class MuAnimatedMeshController : Node
 
             target.Mesh = mesh;
         }
+    }
+
+    private void RefreshProcessState()
+    {
+        SetProcess(_frameCount > 1 && _externalAnimationEnabled);
     }
 
     private static int GetTotalFrames(BMD bmd, int actionIndex)

@@ -198,6 +198,11 @@ public sealed class LorenciaWorldObjectRules : IWorldObjectRules
             SetAlphaBlend(mat);
             mat.BlendMode = BaseMaterial3D.BlendModeEnum.Add;
             mat.DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Disabled;
+            if (type is 50 or 51 or 52 or 80)
+            {
+                mat.DisableFog = true;
+                mat.TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear;
+            }
         }
 
         for (int i = 0; i < alphaCount; i++)

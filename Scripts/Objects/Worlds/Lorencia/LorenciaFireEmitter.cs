@@ -501,7 +501,8 @@ public sealed partial class LorenciaFireEmitter : Node3D
         if (path == null)
             return null;
 
-        return await MuTextureHelper.LoadTextureAsync(path, generateMipmaps: true);
+        // Fire sprites use alpha edges; mipmaps can introduce bright fringes on transparent borders.
+        return await MuTextureHelper.LoadTextureAsync(path, generateMipmaps: false);
     }
 
     private static string? ResolveEffectTexturePath(string fileNoExt)
@@ -541,9 +542,10 @@ public sealed partial class LorenciaFireEmitter : Node3D
             DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Disabled,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
             BillboardMode = BaseMaterial3D.BillboardModeEnum.Enabled,
+            DisableFog = true,
             AlbedoTexture = texture,
             AlbedoColor = new Color(1f, 1f, 1f, 1f),
-            TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmaps
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear
         };
 
         // Match MonoGame SpriteObject fire pass: depth read enabled, depth write disabled.
