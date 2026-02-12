@@ -1,0 +1,30 @@
+[gd_scene format=3 uid="uid://csuxngwgj66w8"]
+
+[ext_resource type="Script" uid="uid://cofufsmcuoyje" path="res://Scripts/Main.cs" id="1_main"]
+
+[node name="Main" type="Node3D" unique_id=609913852]
+script = ExtResource("1_main")
+LoadObjectsInEditor = true
+AnimateObjectsInEditor = true
+EditorAnimateFire = true
+EditorFireLightsWhenAnimationOff = true
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=262076923]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 128, 30, -128)
+current = true
+fov = 60.0
+far = 1000.0
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1330696658]
+transform = Transform3D(-4.371139e-08, -0.7071068, 0.7071067, 0, 0.7071067, 0.7071068, -1, 3.090862e-08, -3.0908616e-08, 0, 0, 0)
+light_color = Color(1, 0.95, 0.85, 1)
+light_energy = 0.95
+shadow_enabled = true
+
+[node name="Terrain" type="Node3D" parent="." unique_id=1336510271]
+
+[node name="Objects" type="Node3D" parent="." unique_id=268803834]
+
+[node name="MusicPlayer" type="AudioStreamPlayer" parent="." unique_id=1610467884]
+
+[node name="AmbientPlayer" type="AudioStreamPlayer" parent="." unique_id=1211698378]

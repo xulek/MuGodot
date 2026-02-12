@@ -1,0 +1,15 @@
+<Project Sdk="Godot.NET.Sdk/4.6.0">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MuGodot</RootNamespace>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Client.Data\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="Client.Data\Client.Data.csproj" />
+  </ItemGroup>
+</Project>
