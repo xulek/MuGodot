@@ -14,6 +14,8 @@ public class MuTerrainBuilder
     private const int Size = MuConfig.TerrainSize; // 256
     private const int SizeMask = Size - 1;
     private const byte WaterTextureIndex = 5;
+    private const byte BlendAlphaSnapLow = 2;
+    private const byte BlendAlphaSnapHigh = 253;
     private static readonly Vector3 DefaultLightDirection = new Vector3(1f, 0f, 1f).Normalized();
 
     private static readonly Shader WaterOpaqueShader = new Shader
@@ -93,6 +95,7 @@ void fragment()
     private readonly Dictionary<int, ImageTexture> _textures = new();
     private readonly Dictionary<int, string> _textureMappingFiles;
     private readonly List<ShaderMaterial> _waterMaterials = new();
+    private byte _fallbackTextureIndex = 0;
     private float _waterTotal = 0f;
     private Vector2 _waterFlowDirection = Vector2.Right;
     private Vector3 _lightDirection = DefaultLightDirection;
@@ -191,6 +194,9 @@ void fragment()
 
     private async Task LoadTerrainTextures(string worldFolder, int worldIndex)
     {
+        _textures.Clear();
+        _fallbackTextureIndex = 0;
+
         // Load mapped textures (grass, ground, water, rock, etc.)
         foreach (var kvp in _textureMappingFiles)
         {
@@ -215,6 +221,7 @@ void fragment()
             }
         }
 
+        RefreshFallbackTextureIndex();
         GD.Print($"Loaded {_textures.Count} terrain textures");
     }
 
@@ -296,8 +303,8 @@ void fragment()
         y = Math.Clamp(y, 0, Size - 1);
         int index = y * Size + x;
 
-        byte layer1 = GetMappingValue(_mapping.Layer1, index, 0);
-        byte layer2 = GetMappingValue(_mapping.Layer2, index, layer1);
+        byte layer1 = ResolveTextureIndex(GetMappingValue(_mapping.Layer1, index, 0), _fallbackTextureIndex);
+        byte layer2 = ResolveTextureIndex(GetMappingValue(_mapping.Layer2, index, layer1), layer1);
         byte alpha = GetMappingValue(_mapping.Alpha, index, 0);
         return alpha == 255 ? layer2 : layer1;
     }
@@ -349,13 +356,13 @@ void fragment()
                 int i3 = (y + 1) * Size + (x + 1);
                 int i4 = (y + 1) * Size + x;
 
-                byte layer1 = GetMappingValue(_mapping.Layer1, i1, 0);
-                byte layer2 = GetMappingValue(_mapping.Layer2, i1, layer1);
+                byte layer1 = ResolveTextureIndex(GetMappingValue(_mapping.Layer1, i1, 0), _fallbackTextureIndex);
+                byte layer2 = ResolveTextureIndex(GetMappingValue(_mapping.Layer2, i1, layer1), layer1);
 
-                byte a1 = GetMappingValue(_mapping.Alpha, i1, 0);
-                byte a2 = GetMappingValue(_mapping.Alpha, i2, 0);
-                byte a3 = GetMappingValue(_mapping.Alpha, i3, 0);
-                byte a4 = GetMappingValue(_mapping.Alpha, i4, 0);
+                byte a1 = GetSnappedBlendAlpha(i1);
+                byte a2 = GetSnappedBlendAlpha(i2);
+                byte a3 = GetSnappedBlendAlpha(i3);
+                byte a4 = GetSnappedBlendAlpha(i4);
 
                 bool isOpaque = (a1 & a2 & a3 & a4) == 255;
                 bool hasAlpha = (a1 | a2 | a3 | a4) != 0;
@@ -369,7 +376,7 @@ void fragment()
                 }
                 opaqueList.Add((x, y));
 
-                if (!isOpaque && hasAlpha)
+                if (!isOpaque && hasAlpha && layer2 != layer1)
                 {
                     if (!alphaTilesByTexture.TryGetValue(layer2, out var alphaList))
                     {
@@ -429,9 +436,15 @@ void fragment()
 
         if (_textures.TryGetValue(texIndex, out var texture))
             material.AlbedoTexture = texture;
+        else if (_textures.TryGetValue(_fallbackTextureIndex, out var fallbackTexture))
+            material.AlbedoTexture = fallbackTexture;
 
         if (alphaLayer)
+        {
             material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+            if (material.AlbedoTexture == null)
+                material.AlbedoColor = new Color(1f, 1f, 1f, 0f);
+        }
 
         return material;
     }
@@ -482,12 +495,63 @@ void fragment()
         if (index < 0 || index >= alphaMap.Length)
             return 0;
 
-        return alphaMap[index];
+        return SnapBlendAlpha(alphaMap[index]);
+    }
+
+    private byte GetSnappedBlendAlpha(int index)
+    {
+        var alphaMap = _mapping.Alpha;
+        if (alphaMap == null || index < 0 || index >= alphaMap.Length)
+            return 0;
+
+        return SnapBlendAlpha(alphaMap[index]);
+    }
+
+    private static byte SnapBlendAlpha(byte alpha)
+    {
+        if (alpha <= BlendAlphaSnapLow)
+            return 0;
+        if (alpha >= BlendAlphaSnapHigh)
+            return 255;
+
+        return alpha;
     }
 
     private static Color WithAlpha(Color color, byte alpha)
     {
         return new Color(color.R, color.G, color.B, alpha / 255f);
+    }
+
+    private byte ResolveTextureIndex(byte requestedIndex, byte fallbackIndex)
+    {
+        if (_textures.ContainsKey(requestedIndex))
+            return requestedIndex;
+
+        if (_textures.ContainsKey(fallbackIndex))
+            return fallbackIndex;
+
+        return _fallbackTextureIndex;
+    }
+
+    private void RefreshFallbackTextureIndex()
+    {
+        byte resolved = 0;
+        bool hasValue = false;
+
+        foreach (var key in _textures.Keys)
+        {
+            if (key < 0 || key > byte.MaxValue)
+                continue;
+
+            byte idx = (byte)key;
+            if (!hasValue || idx < resolved)
+            {
+                resolved = idx;
+                hasValue = true;
+            }
+        }
+
+        _fallbackTextureIndex = hasValue ? resolved : (byte)0;
     }
 
     private Vector2 GetTerrainUvStep(byte texIndex)

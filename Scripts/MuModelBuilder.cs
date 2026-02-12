@@ -31,7 +31,7 @@ public class MuModelBuilder
         return BuildMesh(bmd, actionIndex: 0, framePos: 0f);
     }
 
-    public async Task<BMD?> LoadBmdAsync(string relativePath)
+    public async Task<BMD?> LoadBmdAsync(string relativePath, bool logMissing = true)
     {
         var fullPath = System.IO.Path.Combine(MuConfig.DataPath, relativePath);
 
@@ -40,7 +40,7 @@ public class MuModelBuilder
 
         if (fullPath == null || !System.IO.File.Exists(fullPath))
         {
-            if (_loggedMissing.Add(relativePath))
+            if (logMissing && _loggedMissing.Add(relativePath))
                 GD.Print($"  [BMD] Not found: {relativePath}");
             return null;
         }

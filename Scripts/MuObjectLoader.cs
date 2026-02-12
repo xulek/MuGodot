@@ -1,4 +1,5 @@
 using Client.Data.OBJS;
+using Client.Data.BMD;
 using Godot;
 using MuGodot.Objects.Worlds;
 
@@ -46,6 +47,7 @@ public class MuObjectLoader
         GD.Print($"Loading {objData.Objects.Length} map objects for World{worldIndex}...");
 
         var worldRules = WorldObjectRulesResolver.Resolve(worldIndex);
+        var availableBmdNames = BuildAvailableObjectBmdNameSet(worldIndex);
 
         // Group objects by type to batch-load models.
         var objectsByType = new Dictionary<short, List<IMapObject>>();
@@ -66,18 +68,33 @@ public class MuObjectLoader
         foreach (var (type, objects) in objectsByType)
         {
             var bmdFileName = worldRules.ResolveModelFileName(type);
-            if (bmdFileName == null)
+            var modelCandidates = BuildModelPathCandidates(worldIndex, type, bmdFileName, availableBmdNames);
+            if (modelCandidates.Count == 0)
             {
                 skippedTypes++;
                 continue;
             }
 
-            var modelPath = System.IO.Path.Combine($"Object{worldIndex}", bmdFileName);
-            var bmd = await _modelBuilder.LoadBmdAsync(modelPath);
-            if (bmd == null)
-                continue;
+            BMD? bmd = null;
+            string? resolvedModelPath = null;
+            for (int candidateIdx = 0; candidateIdx < modelCandidates.Count; candidateIdx++)
+            {
+                // We'll log at most once per type after all candidates fail.
+                bmd = await _modelBuilder.LoadBmdAsync(modelCandidates[candidateIdx], logMissing: false);
+                if (bmd != null)
+                {
+                    resolvedModelPath = modelCandidates[candidateIdx];
+                    break;
+                }
+            }
 
-            var materials = await _modelBuilder.LoadModelTexturesAsync(modelPath);
+            if (bmd == null)
+            {
+                GD.Print($"  [BMD] Not found for type {type}: {string.Join(", ", modelCandidates)}");
+                continue;
+            }
+
+            var materials = await _modelBuilder.LoadModelTexturesAsync(resolvedModelPath!);
             MuAnimatedMeshController? animationController = null;
             Mesh? sharedMesh;
 
@@ -160,6 +177,76 @@ public class MuObjectLoader
 
         GD.Print($"Placed {placedCount} objects ({objectsByType.Count} unique types, {skippedTypes} unmapped)");
         return parent;
+    }
+
+    private static HashSet<string>? BuildAvailableObjectBmdNameSet(int worldIndex)
+    {
+        string objectDir = ResolveObjectDirectoryPath(worldIndex);
+        if (!System.IO.Directory.Exists(objectDir))
+            return null;
+
+        var names = System.IO.Directory.EnumerateFiles(objectDir)
+            .Where(path => string.Equals(System.IO.Path.GetExtension(path), ".bmd", StringComparison.OrdinalIgnoreCase))
+            .Select(System.IO.Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Cast<string>();
+
+        return new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveObjectDirectoryPath(int worldIndex)
+    {
+        string direct = System.IO.Path.Combine(MuConfig.DataPath, $"Object{worldIndex}");
+        if (System.IO.Directory.Exists(direct))
+            return direct;
+
+        if (!System.IO.Directory.Exists(MuConfig.DataPath))
+            return direct;
+
+        return System.IO.Directory.GetDirectories(MuConfig.DataPath)
+            .FirstOrDefault(d => string.Equals(
+                System.IO.Path.GetFileName(d),
+                $"Object{worldIndex}",
+                StringComparison.OrdinalIgnoreCase)) ?? direct;
+    }
+
+    private static List<string> BuildModelPathCandidates(
+        int worldIndex,
+        short type,
+        string? preferredFileName,
+        HashSet<string>? availableBmdNames)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var candidates = new List<string>(6);
+
+        void TryAdd(string? fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return;
+
+            if (!seen.Add(fileName))
+                return;
+
+            if (availableBmdNames != null && !availableBmdNames.Contains(fileName))
+                return;
+
+            candidates.Add(System.IO.Path.Combine($"Object{worldIndex}", fileName));
+        }
+
+        // Prefer world-specific naming rules first.
+        TryAdd(preferredFileName);
+
+        // Generic fallback used by many modern clients: Object01.bmd, Object02.bmd, ...
+        if (type >= 0)
+        {
+            int n = type + 1;
+            TryAdd($"Object{n}.bmd");
+            TryAdd($"Object{n:D2}.bmd");
+            TryAdd($"Object{n:D3}.bmd");
+            TryAdd($"Object{n:D4}.bmd");
+        }
+
+        return candidates;
     }
 
     /// <summary>
