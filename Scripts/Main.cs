@@ -272,12 +272,58 @@ public partial class Main : Node3D
 		_terrainBuilder.WaterSpeed = 0f;
 		_terrainBuilder.DistortionAmplitude = 0f;
 		_terrainBuilder.DistortionFrequency = 0f;
+		_terrainBuilder.WaterUvSpeed = 0.015f;
+		_terrainBuilder.WaterCrossUvSpeed = 0.008f;
+		_terrainBuilder.WaterCrossUvBlend = 0.42f;
+		_terrainBuilder.WaterCrestStrength = 0.06f;
+		_terrainBuilder.GerstnerStrength = 0f;
+		_terrainBuilder.GerstnerSteepness = 0.7f;
+		_terrainBuilder.GerstnerDirectionA = new Vector2(1f, 0.2f);
+		_terrainBuilder.GerstnerDirectionB = new Vector2(0.35f, 1f);
+		_terrainBuilder.GerstnerDirectionC = new Vector2(-0.75f, 0.5f);
+		_terrainBuilder.GerstnerAmplitudeA = 0.03f;
+		_terrainBuilder.GerstnerAmplitudeB = 0.018f;
+		_terrainBuilder.GerstnerAmplitudeC = 0.012f;
+		_terrainBuilder.GerstnerWavelengthA = 3.6f;
+		_terrainBuilder.GerstnerWavelengthB = 2.1f;
+		_terrainBuilder.GerstnerWavelengthC = 1.3f;
+		_terrainBuilder.GerstnerSpeedA = 2.1f;
+		_terrainBuilder.GerstnerSpeedB = 1.55f;
+		_terrainBuilder.GerstnerSpeedC = 2.9f;
+		_terrainBuilder.WaterTint = new Vector3(0.84f, 0.97f, 1.08f);
+		_terrainBuilder.WaterFresnelColor = new Vector3(0.34f, 0.56f, 0.72f);
+		_terrainBuilder.WaterFresnelStrength = 0.26f;
+		_terrainBuilder.WaterSpecularColor = new Vector3(1f, 1f, 1f);
+		_terrainBuilder.WaterSpecularStrength = 0.16f;
+		_terrainBuilder.WaterSpecularPower = 64f;
 
 		if (worldIndex == 1)
 		{
-			_terrainBuilder.WaterSpeed = 0.05f;
-			_terrainBuilder.DistortionAmplitude = 0.2f;
-			_terrainBuilder.DistortionFrequency = 1.0f;
+			_terrainBuilder.WaterFlowDirection = new Vector2(1f, 0.18f).Normalized();
+			_terrainBuilder.WaterSpeed = 0.26f;
+			_terrainBuilder.DistortionAmplitude = 0.052f;
+			_terrainBuilder.DistortionFrequency = 1.05f;
+			_terrainBuilder.WaterUvSpeed = 0.068f;
+			_terrainBuilder.WaterCrossUvSpeed = 0.038f;
+			_terrainBuilder.WaterCrossUvBlend = 0.50f;
+			_terrainBuilder.WaterCrestStrength = 0.045f;
+			_terrainBuilder.GerstnerStrength = 1.35f;
+			_terrainBuilder.GerstnerSteepness = 1.08f;
+			_terrainBuilder.GerstnerAmplitudeA = 0.095f;
+			_terrainBuilder.GerstnerAmplitudeB = 0.055f;
+			_terrainBuilder.GerstnerAmplitudeC = 0.035f;
+			_terrainBuilder.GerstnerWavelengthA = 7.0f;
+			_terrainBuilder.GerstnerWavelengthB = 4.4f;
+			_terrainBuilder.GerstnerWavelengthC = 2.6f;
+			_terrainBuilder.GerstnerSpeedA = 2.8f;
+			_terrainBuilder.GerstnerSpeedB = 2.0f;
+			_terrainBuilder.GerstnerSpeedC = 3.6f;
+			_terrainBuilder.WaterTint = new Vector3(0.23f, 0.34f, 0.48f);
+			_terrainBuilder.WaterFresnelColor = new Vector3(0.10f, 0.18f, 0.28f);
+			_terrainBuilder.WaterFresnelStrength = 0.07f;
+			_terrainBuilder.WaterSpecularColor = new Vector3(0.68f, 0.77f, 0.86f);
+			_terrainBuilder.WaterSpecularStrength = 0.03f;
+			_terrainBuilder.WaterSpecularPower = 138f;
 
 			// Match Lorencia grass setup from MonoGame.
 			_grassRenderer?.ConfigureGrass(brightness: 2.0f, textureIndices: new byte[] { 0 });

@@ -24,30 +24,150 @@ public class MuTerrainBuilder
 shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque, unshaded;
 
-uniform sampler2D albedo_texture : source_color;
+uniform sampler2D albedo_texture : source_color, repeat_enable, filter_linear_mipmap;
 uniform vec2 water_flow_direction = vec2(1.0, 0.0);
 uniform float water_total = 0.0;
 uniform float distortion_amplitude = 0.0;
 uniform float distortion_frequency = 1.0;
+uniform float gerstner_strength = 0.0;
+uniform float gerstner_steepness = 0.7;
+uniform vec2 gerstner_dir_a = vec2(1.0, 0.2);
+uniform vec2 gerstner_dir_b = vec2(0.35, 1.0);
+uniform vec2 gerstner_dir_c = vec2(-0.75, 0.5);
+uniform float gerstner_amp_a = 0.03;
+uniform float gerstner_amp_b = 0.018;
+uniform float gerstner_amp_c = 0.012;
+uniform float gerstner_len_a = 3.6;
+uniform float gerstner_len_b = 2.1;
+uniform float gerstner_len_c = 1.3;
+uniform float gerstner_speed_a = 2.1;
+uniform float gerstner_speed_b = 1.55;
+uniform float gerstner_speed_c = 2.9;
+uniform vec3 water_tint = vec3(0.84, 0.97, 1.08);
+uniform vec3 fresnel_color = vec3(0.34, 0.56, 0.72);
+uniform float fresnel_strength = 0.26;
+uniform vec3 specular_color = vec3(1.0, 1.0, 1.0);
+uniform float specular_strength = 0.16;
+uniform float specular_power = 64.0;
+uniform float water_uv_speed = 0.02;
+uniform float water_uv_cross_speed = 0.013;
+uniform float water_uv_cross_blend = 0.46;
+uniform vec3 water_light_direction = vec3(0.65, 0.68, -0.33);
+uniform float crest_strength = 0.10;
 
 varying vec2 flow_uv;
+varying vec3 wave_normal;
+
+vec2 safe_dir(vec2 value)
+{
+    float len = length(value);
+    return len > 0.0001 ? value / len : vec2(1.0, 0.0);
+}
+
+void apply_gerstner_wave(
+    inout vec3 pos,
+    inout vec3 tangent,
+    inout vec3 binormal,
+    vec2 direction,
+    float amplitude,
+    float wavelength,
+    float speed,
+    float steepness,
+    float time_value)
+{
+    vec2 dir = safe_dir(direction);
+    float len = max(wavelength, 0.05);
+    float k = 6.2831853 / len;
+    float phase = k * dot(dir, pos.xz) + speed * time_value;
+    float s = sin(phase);
+    float c = cos(phase);
+    float qa = steepness * amplitude;
+
+    pos.x += dir.x * qa * c;
+    pos.z += dir.y * qa * c;
+    pos.y += amplitude * s;
+
+    float kqa = k * qa;
+    float ka = k * amplitude;
+    tangent += vec3(-dir.x * dir.x * kqa * s, dir.x * ka * c, -dir.x * dir.y * kqa * s);
+    binormal += vec3(-dir.x * dir.y * kqa * s, dir.y * ka * c, -dir.y * dir.y * kqa * s);
+}
 
 void vertex()
 {
-    vec2 uv = UV + water_flow_direction * water_total;
+    vec2 flow_dir = safe_dir(water_flow_direction);
+    vec2 uv = UV + flow_dir * water_total * water_uv_speed;
     float f = max(0.01, distortion_frequency);
     float wrap_period = 6.2831853 / f;
     float phase = mod(water_total, wrap_period);
 
     uv.x += sin((UV.x + phase) * f) * distortion_amplitude;
     uv.y += cos((UV.y + phase) * f) * distortion_amplitude;
+    vec2 cross_dir = vec2(-flow_dir.y, flow_dir.x);
+    uv += cross_dir * sin((UV.x + UV.y + water_total * 0.35) * 1.7) * distortion_amplitude * 0.15;
+
+    float strength = clamp(gerstner_strength, 0.0, 1.6);
+    if (strength > 0.0001)
+    {
+        vec3 pos = VERTEX;
+        vec3 tangent = vec3(1.0, 0.0, 0.0);
+        vec3 binormal = vec3(0.0, 0.0, 1.0);
+        float steepness = clamp(gerstner_steepness, 0.0, 1.25);
+
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_a, gerstner_amp_a * strength, gerstner_len_a, gerstner_speed_a, steepness, water_total);
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_b, gerstner_amp_b * strength, gerstner_len_b, gerstner_speed_b, steepness, water_total);
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_c, gerstner_amp_c * strength, gerstner_len_c, gerstner_speed_c, steepness, water_total);
+
+        vec3 n = normalize(cross(binormal, tangent));
+        VERTEX = pos;
+        NORMAL = n;
+        wave_normal = n;
+        uv += n.xz * (distortion_amplitude * 0.25);
+    }
+    else
+    {
+        wave_normal = NORMAL;
+    }
+
     flow_uv = uv;
 }
 
 void fragment()
 {
-    vec4 tex = texture(albedo_texture, flow_uv);
-    ALBEDO = tex.rgb * COLOR.rgb;
+    vec2 flow_dir = safe_dir(water_flow_direction);
+    vec2 cross_dir = vec2(-flow_dir.y, flow_dir.x);
+    float uv_mix = clamp(water_uv_cross_blend, 0.0, 1.0);
+    vec2 uv_primary = fract(flow_uv);
+    vec2 uv_secondary = fract(flow_uv + cross_dir * (water_total * water_uv_cross_speed));
+    vec4 tex_primary = texture(albedo_texture, uv_primary);
+    vec4 tex_secondary = texture(albedo_texture, uv_secondary);
+    vec4 tex = mix(tex_primary, tex_secondary, uv_mix);
+
+    if (gerstner_strength <= 0.0001)
+    {
+        ALBEDO = tex.rgb * COLOR.rgb;
+    }
+    else
+    {
+        vec3 n = normalize(wave_normal);
+        vec3 v = normalize(VIEW);
+        vec3 l = normalize(water_light_direction);
+        vec3 base = tex.rgb * COLOR.rgb;
+
+        float ndl = max(dot(n, l), 0.0);
+        float ndv = clamp(dot(n, v), 0.0, 1.0);
+        float fresnel = pow(1.0 - ndv, 4.8);
+        vec3 h = normalize(l + v);
+        float spec = pow(max(dot(n, h), 0.0), max(specular_power, 1.0)) * (0.3 + 0.7 * ndl);
+        float crest = smoothstep(0.42, 0.9, 1.0 - n.y) * crest_strength * clamp(gerstner_strength, 0.0, 1.6);
+
+        vec3 shaded = base * water_tint;
+        shaded *= (0.46 + 0.34 * ndl);
+        shaded += fresnel * fresnel_strength * fresnel_color;
+        shaded += spec * specular_strength * specular_color;
+        shaded += crest * vec3(0.36, 0.46, 0.56);
+        ALBEDO = shaded;
+    }
 }
 "
     };
@@ -58,31 +178,153 @@ void fragment()
 shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque, blend_mix, unshaded;
 
-uniform sampler2D albedo_texture : source_color;
+uniform sampler2D albedo_texture : source_color, repeat_enable, filter_linear_mipmap;
 uniform vec2 water_flow_direction = vec2(1.0, 0.0);
 uniform float water_total = 0.0;
 uniform float distortion_amplitude = 0.0;
 uniform float distortion_frequency = 1.0;
+uniform float gerstner_strength = 0.0;
+uniform float gerstner_steepness = 0.7;
+uniform vec2 gerstner_dir_a = vec2(1.0, 0.2);
+uniform vec2 gerstner_dir_b = vec2(0.35, 1.0);
+uniform vec2 gerstner_dir_c = vec2(-0.75, 0.5);
+uniform float gerstner_amp_a = 0.03;
+uniform float gerstner_amp_b = 0.018;
+uniform float gerstner_amp_c = 0.012;
+uniform float gerstner_len_a = 3.6;
+uniform float gerstner_len_b = 2.1;
+uniform float gerstner_len_c = 1.3;
+uniform float gerstner_speed_a = 2.1;
+uniform float gerstner_speed_b = 1.55;
+uniform float gerstner_speed_c = 2.9;
+uniform vec3 water_tint = vec3(0.84, 0.97, 1.08);
+uniform vec3 fresnel_color = vec3(0.34, 0.56, 0.72);
+uniform float fresnel_strength = 0.26;
+uniform vec3 specular_color = vec3(1.0, 1.0, 1.0);
+uniform float specular_strength = 0.16;
+uniform float specular_power = 64.0;
+uniform float water_uv_speed = 0.02;
+uniform float water_uv_cross_speed = 0.013;
+uniform float water_uv_cross_blend = 0.46;
+uniform vec3 water_light_direction = vec3(0.65, 0.68, -0.33);
+uniform float crest_strength = 0.10;
 
 varying vec2 flow_uv;
+varying vec3 wave_normal;
+
+vec2 safe_dir(vec2 value)
+{
+    float len = length(value);
+    return len > 0.0001 ? value / len : vec2(1.0, 0.0);
+}
+
+void apply_gerstner_wave(
+    inout vec3 pos,
+    inout vec3 tangent,
+    inout vec3 binormal,
+    vec2 direction,
+    float amplitude,
+    float wavelength,
+    float speed,
+    float steepness,
+    float time_value)
+{
+    vec2 dir = safe_dir(direction);
+    float len = max(wavelength, 0.05);
+    float k = 6.2831853 / len;
+    float phase = k * dot(dir, pos.xz) + speed * time_value;
+    float s = sin(phase);
+    float c = cos(phase);
+    float qa = steepness * amplitude;
+
+    pos.x += dir.x * qa * c;
+    pos.z += dir.y * qa * c;
+    pos.y += amplitude * s;
+
+    float kqa = k * qa;
+    float ka = k * amplitude;
+    tangent += vec3(-dir.x * dir.x * kqa * s, dir.x * ka * c, -dir.x * dir.y * kqa * s);
+    binormal += vec3(-dir.x * dir.y * kqa * s, dir.y * ka * c, -dir.y * dir.y * kqa * s);
+}
 
 void vertex()
 {
-    vec2 uv = UV + water_flow_direction * water_total;
+    vec2 flow_dir = safe_dir(water_flow_direction);
+    vec2 uv = UV + flow_dir * water_total * water_uv_speed;
     float f = max(0.01, distortion_frequency);
     float wrap_period = 6.2831853 / f;
     float phase = mod(water_total, wrap_period);
 
     uv.x += sin((UV.x + phase) * f) * distortion_amplitude;
     uv.y += cos((UV.y + phase) * f) * distortion_amplitude;
+    vec2 cross_dir = vec2(-flow_dir.y, flow_dir.x);
+    uv += cross_dir * sin((UV.x + UV.y + water_total * 0.35) * 1.7) * distortion_amplitude * 0.15;
+
+    float strength = clamp(gerstner_strength, 0.0, 1.6);
+    if (strength > 0.0001)
+    {
+        vec3 pos = VERTEX;
+        vec3 tangent = vec3(1.0, 0.0, 0.0);
+        vec3 binormal = vec3(0.0, 0.0, 1.0);
+        float steepness = clamp(gerstner_steepness, 0.0, 1.25);
+
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_a, gerstner_amp_a * strength, gerstner_len_a, gerstner_speed_a, steepness, water_total);
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_b, gerstner_amp_b * strength, gerstner_len_b, gerstner_speed_b, steepness, water_total);
+        apply_gerstner_wave(pos, tangent, binormal, gerstner_dir_c, gerstner_amp_c * strength, gerstner_len_c, gerstner_speed_c, steepness, water_total);
+
+        vec3 n = normalize(cross(binormal, tangent));
+        VERTEX = pos;
+        NORMAL = n;
+        wave_normal = n;
+        uv += n.xz * (distortion_amplitude * 0.25);
+    }
+    else
+    {
+        wave_normal = NORMAL;
+    }
+
     flow_uv = uv;
 }
 
 void fragment()
 {
-    vec4 tex = texture(albedo_texture, flow_uv);
-    ALBEDO = tex.rgb * COLOR.rgb;
-    ALPHA = tex.a * COLOR.a;
+    vec2 flow_dir = safe_dir(water_flow_direction);
+    vec2 cross_dir = vec2(-flow_dir.y, flow_dir.x);
+    float uv_mix = clamp(water_uv_cross_blend, 0.0, 1.0);
+    vec2 uv_primary = fract(flow_uv);
+    vec2 uv_secondary = fract(flow_uv + cross_dir * (water_total * water_uv_cross_speed));
+    vec4 tex_primary = texture(albedo_texture, uv_primary);
+    vec4 tex_secondary = texture(albedo_texture, uv_secondary);
+    vec4 tex = mix(tex_primary, tex_secondary, uv_mix);
+
+    if (gerstner_strength <= 0.0001)
+    {
+        ALBEDO = tex.rgb * COLOR.rgb;
+        ALPHA = tex.a * COLOR.a;
+    }
+    else
+    {
+        vec3 n = normalize(wave_normal);
+        vec3 v = normalize(VIEW);
+        vec3 l = normalize(water_light_direction);
+        vec3 base = tex.rgb * COLOR.rgb;
+
+        float ndl = max(dot(n, l), 0.0);
+        float ndv = clamp(dot(n, v), 0.0, 1.0);
+        float fresnel = pow(1.0 - ndv, 4.8);
+        vec3 h = normalize(l + v);
+        float spec = pow(max(dot(n, h), 0.0), max(specular_power, 1.0)) * (0.3 + 0.7 * ndl);
+        float crest = smoothstep(0.42, 0.9, 1.0 - n.y) * crest_strength * clamp(gerstner_strength, 0.0, 1.6);
+
+        vec3 shaded = base * water_tint;
+        shaded *= (0.46 + 0.34 * ndl);
+        shaded += fresnel * fresnel_strength * fresnel_color;
+        shaded += spec * specular_strength * specular_color;
+        shaded += crest * vec3(0.36, 0.46, 0.56);
+
+        ALBEDO = shaded;
+        ALPHA = tex.a * COLOR.a;
+    }
 }
 "
     };
@@ -100,10 +342,37 @@ void fragment()
     private Vector2 _waterFlowDirection = Vector2.Right;
     private Vector3 _lightDirection = DefaultLightDirection;
     private float _ambientLight = 0.25f;
+    private static readonly Vector2 DefaultWaveDirectionA = new Vector2(1f, 0.2f).Normalized();
+    private static readonly Vector2 DefaultWaveDirectionB = new Vector2(0.35f, 1f).Normalized();
+    private static readonly Vector2 DefaultWaveDirectionC = new Vector2(-0.75f, 0.5f).Normalized();
 
     public float WaterSpeed { get; set; } = 0f;
     public float DistortionAmplitude { get; set; } = 0f;
     public float DistortionFrequency { get; set; } = 0f;
+    public float WaterUvSpeed { get; set; } = 0.02f;
+    public float WaterCrossUvSpeed { get; set; } = 0.013f;
+    public float WaterCrossUvBlend { get; set; } = 0.46f;
+    public float WaterCrestStrength { get; set; } = 0.10f;
+    public float GerstnerStrength { get; set; } = 0f;
+    public float GerstnerSteepness { get; set; } = 0.7f;
+    public Vector2 GerstnerDirectionA { get; set; } = DefaultWaveDirectionA;
+    public Vector2 GerstnerDirectionB { get; set; } = DefaultWaveDirectionB;
+    public Vector2 GerstnerDirectionC { get; set; } = DefaultWaveDirectionC;
+    public float GerstnerAmplitudeA { get; set; } = 0.03f;
+    public float GerstnerAmplitudeB { get; set; } = 0.018f;
+    public float GerstnerAmplitudeC { get; set; } = 0.012f;
+    public float GerstnerWavelengthA { get; set; } = 3.6f;
+    public float GerstnerWavelengthB { get; set; } = 2.1f;
+    public float GerstnerWavelengthC { get; set; } = 1.3f;
+    public float GerstnerSpeedA { get; set; } = 2.1f;
+    public float GerstnerSpeedB { get; set; } = 1.55f;
+    public float GerstnerSpeedC { get; set; } = 2.9f;
+    public Vector3 WaterTint { get; set; } = new Vector3(0.84f, 0.97f, 1.08f);
+    public Vector3 WaterFresnelColor { get; set; } = new Vector3(0.34f, 0.56f, 0.72f);
+    public float WaterFresnelStrength { get; set; } = 0.26f;
+    public Vector3 WaterSpecularColor { get; set; } = Vector3.One;
+    public float WaterSpecularStrength { get; set; } = 0.16f;
+    public float WaterSpecularPower { get; set; } = 64f;
     public float AmbientLight
     {
         get => _ambientLight;
@@ -154,6 +423,7 @@ void fragment()
     /// </summary>
     public async Task LoadAsync(int worldIndex)
     {
+        _waterTotal = 0f;
         var worldFolder = System.IO.Path.Combine(MuConfig.DataPath, $"World{worldIndex}");
         if (!System.IO.Directory.Exists(worldFolder))
         {
@@ -473,6 +743,42 @@ void fragment()
         material.SetShaderParameter("water_total", _waterTotal);
         material.SetShaderParameter("distortion_amplitude", DistortionAmplitude);
         material.SetShaderParameter("distortion_frequency", Math.Max(0.01f, DistortionFrequency));
+        material.SetShaderParameter("water_uv_speed", Math.Max(0f, WaterUvSpeed));
+        material.SetShaderParameter("water_uv_cross_speed", Math.Max(0f, WaterCrossUvSpeed));
+        material.SetShaderParameter("water_uv_cross_blend", Mathf.Clamp(WaterCrossUvBlend, 0f, 1f));
+        material.SetShaderParameter("water_light_direction", GetWaterLightDirectionGodot());
+        material.SetShaderParameter("crest_strength", Math.Max(0f, WaterCrestStrength));
+        material.SetShaderParameter("gerstner_strength", Mathf.Clamp(GerstnerStrength, 0f, 1.6f));
+        material.SetShaderParameter("gerstner_steepness", Mathf.Clamp(GerstnerSteepness, 0f, 1.25f));
+        material.SetShaderParameter("gerstner_dir_a", NormalizeOrFallback(GerstnerDirectionA, DefaultWaveDirectionA));
+        material.SetShaderParameter("gerstner_dir_b", NormalizeOrFallback(GerstnerDirectionB, DefaultWaveDirectionB));
+        material.SetShaderParameter("gerstner_dir_c", NormalizeOrFallback(GerstnerDirectionC, DefaultWaveDirectionC));
+        material.SetShaderParameter("gerstner_amp_a", Math.Max(0f, GerstnerAmplitudeA));
+        material.SetShaderParameter("gerstner_amp_b", Math.Max(0f, GerstnerAmplitudeB));
+        material.SetShaderParameter("gerstner_amp_c", Math.Max(0f, GerstnerAmplitudeC));
+        material.SetShaderParameter("gerstner_len_a", Math.Max(0.05f, GerstnerWavelengthA));
+        material.SetShaderParameter("gerstner_len_b", Math.Max(0.05f, GerstnerWavelengthB));
+        material.SetShaderParameter("gerstner_len_c", Math.Max(0.05f, GerstnerWavelengthC));
+        material.SetShaderParameter("gerstner_speed_a", GerstnerSpeedA);
+        material.SetShaderParameter("gerstner_speed_b", GerstnerSpeedB);
+        material.SetShaderParameter("gerstner_speed_c", GerstnerSpeedC);
+        material.SetShaderParameter("water_tint", WaterTint);
+        material.SetShaderParameter("fresnel_color", WaterFresnelColor);
+        material.SetShaderParameter("fresnel_strength", Math.Max(0f, WaterFresnelStrength));
+        material.SetShaderParameter("specular_color", WaterSpecularColor);
+        material.SetShaderParameter("specular_strength", Math.Max(0f, WaterSpecularStrength));
+        material.SetShaderParameter("specular_power", Math.Max(1f, WaterSpecularPower));
+    }
+
+    private Vector3 GetWaterLightDirectionGodot()
+    {
+        var godot = new Vector3(_lightDirection.X, _lightDirection.Z, -_lightDirection.Y);
+        return godot.LengthSquared() < 0.0001f ? Vector3.Up : godot.Normalized();
+    }
+
+    private static Vector2 NormalizeOrFallback(Vector2 value, Vector2 fallback)
+    {
+        return value.LengthSquared() < 0.0001f ? fallback : value.Normalized();
     }
 
     private static byte GetMappingValue(byte[]? map, int index, byte fallback)
