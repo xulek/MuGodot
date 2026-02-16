@@ -26,6 +26,7 @@ window/size/viewport_height=720
 [dotnet]
 
 project/assembly_name="MuGodot"
+project/assembly_reload_attempts=1
 
 [rendering]
 

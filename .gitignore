@@ -344,3 +344,4 @@ mono_crash.*.json
 **/TestResults/
 **/BenchmarkDotNet.Artifacts/
 **/artifacts/
+monogame/

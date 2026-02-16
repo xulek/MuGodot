@@ -103,7 +103,8 @@ void fragment()
 
     private Node3D? _root;
     private MultiMeshInstance3D? _instanceNode;
-    private MultiMesh? _multiMesh;
+    private MultiMesh? _activeMultiMesh;
+    private MultiMesh? _stagingMultiMesh;
     private ShaderMaterial? _material;
 
     private float _refreshTimer;
@@ -111,6 +112,13 @@ void fragment()
     private Vector2 _lastRebuildCameraPos;
     private bool _hasLastCameraPos;
     private bool _initialized;
+    private bool _rebuildInProgress;
+    private int _rebuildTileCursor;
+    private int _rebuildInstanceCount;
+    private float _rebuildFocalPx;
+    private bool _rebuildHasScreenCull;
+    private bool _rebuildQueued;
+    private Vector3 _queuedCameraPosition;
 
     public int MaxInstances { get; set; } = 44000;
     public float RefreshIntervalSeconds { get; set; } = 0.20f;
@@ -120,6 +128,8 @@ void fragment()
     public float AlphaCutoff { get; set; } = 0.40f;
     public float DensityScale { get; set; } = 1.5f;
     public float RebuildCameraMoveThreshold { get; set; } = 0.75f;
+    public bool ProgressiveRebuild { get; set; } = true;
+    public int RebuildTilesPerFrame { get; set; } = 220;
 
     public MuGrassRenderer(MuTerrainBuilder terrain)
     {
@@ -170,33 +180,27 @@ void fragment()
         _material.SetShaderParameter("alpha_scissor", Mathf.Clamp(AlphaCutoff, 0.05f, 0.95f));
         mesh.SurfaceSetMaterial(0, _material);
 
-        _multiMesh = new MultiMesh
-        {
-            TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
-            UseColors = true,
-            UseCustomData = true,
-            InstanceCount = MaxInstances,
-            VisibleInstanceCount = 0,
-            Mesh = mesh
-        };
+        _activeMultiMesh = CreateMultiMesh(mesh);
+        _stagingMultiMesh = CreateMultiMesh(mesh);
 
         _instanceNode = new MultiMeshInstance3D
         {
             Name = "GrassInstances",
-            Multimesh = _multiMesh,
+            Multimesh = _activeMultiMesh,
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off
         };
 
         _root.AddChild(_instanceNode);
         _initialized = true;
 
-        RebuildVisibleInstances(cameraPosition);
+        StartRebuild(cameraPosition);
+        ContinueRebuild(int.MaxValue);
         GD.Print($"[Grass] Initialized {_grassTiles.Count} candidate tiles for World{worldIndex}.");
     }
 
     public void Update(double delta, Vector3 cameraPosition)
     {
-        if (!_initialized || _material == null || _multiMesh == null)
+        if (!_initialized || _material == null || _activeMultiMesh == null || _stagingMultiMesh == null)
             return;
 
         _windTime += (float)delta;
@@ -206,21 +210,45 @@ void fragment()
         _material.SetShaderParameter("alpha_scissor", Mathf.Clamp(AlphaCutoff, 0.05f, 0.95f));
 
         _refreshTimer += (float)delta;
-        if (_refreshTimer < RefreshIntervalSeconds)
-            return;
-
-        _refreshTimer = 0f;
-        var currentPos = new Vector2(cameraPosition.X, -cameraPosition.Z);
-        if (_hasLastCameraPos)
+        if (_refreshTimer >= RefreshIntervalSeconds)
         {
-            float thresholdSq = RebuildCameraMoveThreshold * RebuildCameraMoveThreshold;
-            if (_lastRebuildCameraPos.DistanceSquaredTo(currentPos) < thresholdSq)
-                return;
+            _refreshTimer = 0f;
+            var currentPos = new Vector2(cameraPosition.X, -cameraPosition.Z);
+            bool shouldRebuild = !_hasLastCameraPos;
+            if (!shouldRebuild)
+            {
+                float thresholdSq = RebuildCameraMoveThreshold * RebuildCameraMoveThreshold;
+                shouldRebuild = _lastRebuildCameraPos.DistanceSquaredTo(currentPos) >= thresholdSq;
+            }
+
+            if (shouldRebuild)
+            {
+                if (_rebuildInProgress)
+                {
+                    _rebuildQueued = true;
+                    _queuedCameraPosition = cameraPosition;
+                }
+                else
+                {
+                    StartRebuild(cameraPosition);
+                }
+            }
         }
 
-        _lastRebuildCameraPos = currentPos;
-        _hasLastCameraPos = true;
-        RebuildVisibleInstances(cameraPosition);
+        if (_rebuildInProgress)
+        {
+            if (ProgressiveRebuild)
+                ContinueRebuild(RebuildTilesPerFrame);
+            else
+                ContinueRebuild(int.MaxValue);
+        }
+        else if (_rebuildQueued)
+        {
+            StartRebuild(_queuedCameraPosition);
+            _rebuildQueued = false;
+            if (!ProgressiveRebuild)
+                ContinueRebuild(int.MaxValue);
+        }
     }
 
     public void Clear()
@@ -229,14 +257,20 @@ void fragment()
         _refreshTimer = 0f;
         _windTime = 0f;
         _hasLastCameraPos = false;
+        _rebuildInProgress = false;
+        _rebuildQueued = false;
+        _rebuildTileCursor = 0;
+        _rebuildInstanceCount = 0;
         _grassTiles.Clear();
+        _visibleTiles.Clear();
 
         if (_root != null && GodotObject.IsInstanceValid(_root))
             _root.QueueFree();
 
         _root = null;
         _instanceNode = null;
-        _multiMesh = null;
+        _activeMultiMesh = null;
+        _stagingMultiMesh = null;
         _material = null;
     }
 
@@ -259,28 +293,46 @@ void fragment()
         }
     }
 
-    private void RebuildVisibleInstances(Vector3 cameraPosition)
+    private void StartRebuild(Vector3 cameraPosition)
     {
-        if (_multiMesh == null)
+        if (_activeMultiMesh == null || _stagingMultiMesh == null)
             return;
+
+        if (_activeMultiMesh.InstanceCount != MaxInstances)
+            _activeMultiMesh.InstanceCount = MaxInstances;
+
+        if (_stagingMultiMesh.InstanceCount != MaxInstances)
+            _stagingMultiMesh.InstanceCount = MaxInstances;
 
         float camX = cameraPosition.X;
         float camY = -cameraPosition.Z;
         _lastRebuildCameraPos = new Vector2(camX, camY);
         _hasLastCameraPos = true;
 
-        float focalPx = 0f;
-        bool hasScreenCull = false;
+        _rebuildFocalPx = 0f;
+        _rebuildHasScreenCull = false;
         var viewport = _instanceNode?.GetViewport();
         var camera = viewport?.GetCamera3D();
         if (viewport != null && camera != null)
         {
             float viewH = Mathf.Max(1f, viewport.GetVisibleRect().Size.Y);
             float fovRad = Mathf.DegToRad(camera.Fov);
-            focalPx = viewH / (2f * Mathf.Tan(fovRad * 0.5f));
-            hasScreenCull = focalPx > 0.001f;
+            _rebuildFocalPx = viewH / (2f * Mathf.Tan(fovRad * 0.5f));
+            _rebuildHasScreenCull = _rebuildFocalPx > 0.001f;
         }
 
+        CollectVisibleTiles(camX, camY);
+        // Prioritize nearest tiles first so grass fills around the player first.
+        _visibleTiles.Sort(static (a, b) => a.DistSq.CompareTo(b.DistSq));
+
+        _rebuildTileCursor = 0;
+        _rebuildInstanceCount = 0;
+        _rebuildInProgress = true;
+        _rebuildQueued = false;
+    }
+
+    private void CollectVisibleTiles(float camX, float camY)
+    {
         int centerX = Mathf.Clamp((int)MathF.Floor(camX), 0, TerrainSize - 1);
         int centerY = Mathf.Clamp((int)MathF.Floor(camY), 0, TerrainSize - 1);
 
@@ -291,7 +343,6 @@ void fragment()
         int maxY = Math.Min(TerrainSize - 2, centerY + farRadius);
 
         _visibleTiles.Clear();
-
         for (int y = minY; y <= maxY; y++)
         {
             int rowBase = y * TerrainSize;
@@ -305,22 +356,29 @@ void fragment()
                 float dx = camX - txCenter;
                 float dy = camY - tyCenter;
                 float distSq = dx * dx + dy * dy;
-
                 if (distSq >= GrassFarSq)
                     continue;
 
                 _visibleTiles.Add(new VisibleGrassTile(x, y, distSq));
             }
         }
+    }
 
-        // Prioritize nearest tiles first so grass does not appear only in one camera-side
-        // when hitting the per-frame instance budget.
-        _visibleTiles.Sort(static (a, b) => a.DistSq.CompareTo(b.DistSq));
+    private void ContinueRebuild(int tilesBudget)
+    {
+        if (_stagingMultiMesh == null || !_rebuildInProgress)
+            return;
 
-        int count = 0;
-        for (int t = 0; t < _visibleTiles.Count; t++)
+        int budget = tilesBudget >= int.MaxValue ? int.MaxValue : Math.Max(16, tilesBudget);
+        int processedTiles = 0;
+
+        while (_rebuildTileCursor < _visibleTiles.Count &&
+               _rebuildInstanceCount < MaxInstances &&
+               processedTiles < budget)
         {
-            var tile = _visibleTiles[t];
+            var tile = _visibleTiles[_rebuildTileCursor++];
+            processedTiles++;
+
             int x = tile.X;
             int y = tile.Y;
             float distSq = tile.DistSq;
@@ -331,8 +389,8 @@ void fragment()
             grassPerTile = ScaleGrassCount(grassPerTile);
             if (grassPerTile == 0)
                 continue;
-            if (hasScreenCull)
-                grassPerTile = AdjustGrassCountForScreenSize(distSq, grassPerTile, focalPx);
+            if (_rebuildHasScreenCull)
+                grassPerTile = AdjustGrassCountForScreenSize(distSq, grassPerTile, _rebuildFocalPx);
             if (grassPerTile == 0)
                 continue;
 
@@ -345,11 +403,8 @@ void fragment()
 
             for (int i = 0; i < grassPerTile; i++)
             {
-                if (count >= MaxInstances)
-                {
-                    _multiMesh.VisibleInstanceCount = count;
-                    return;
-                }
+                if (_rebuildInstanceCount >= MaxInstances)
+                    break;
 
                 float halfUV = GrassUWidth * 0.5f;
                 float maxOffset = 0.5f - halfUV;
@@ -365,18 +420,37 @@ void fragment()
 
                 var basis = Basis.FromEuler(new Vector3(0f, yaw, 0f)).Scaled(new Vector3(scale, scale, scale));
                 var transform = new Transform3D(basis, new Vector3(worldX, ground + HeightOffset, -worldY));
-                _multiMesh.SetInstanceTransform(count, transform);
-                _multiMesh.SetInstanceColor(count, lit);
+                _stagingMultiMesh.SetInstanceTransform(_rebuildInstanceCount, transform);
+                _stagingMultiMesh.SetInstanceColor(_rebuildInstanceCount, lit);
 
                 float u0 = PseudoRandom(x, y, 123 + i) * (1f - GrassUWidth);
                 float phase01 = PseudoRandom(x, y, 211 + i);
                 float amp01 = PseudoRandom(x, y, 307 + i);
-                _multiMesh.SetInstanceCustomData(count, new Color(u0, GrassUWidth, phase01, amp01));
-                count++;
+                _stagingMultiMesh.SetInstanceCustomData(_rebuildInstanceCount, new Color(u0, GrassUWidth, phase01, amp01));
+                _rebuildInstanceCount++;
             }
         }
 
-        _multiMesh.VisibleInstanceCount = count;
+        if (_rebuildTileCursor >= _visibleTiles.Count || _rebuildInstanceCount >= MaxInstances)
+            CompleteRebuild();
+    }
+
+    private void CompleteRebuild()
+    {
+        if (_instanceNode == null || _activeMultiMesh == null || _stagingMultiMesh == null)
+        {
+            _rebuildInProgress = false;
+            return;
+        }
+
+        // Keep rendering the previous buffer until the full rebuild is ready, then swap atomically.
+        _stagingMultiMesh.VisibleInstanceCount = _rebuildInstanceCount;
+        var completed = _stagingMultiMesh;
+        _stagingMultiMesh = _activeMultiMesh;
+        _activeMultiMesh = completed;
+        _stagingMultiMesh.VisibleInstanceCount = 0;
+        _instanceNode.Multimesh = _activeMultiMesh;
+        _rebuildInProgress = false;
     }
 
     private static int GetGrassCount(float distSq)
@@ -448,6 +522,19 @@ void fragment()
 
         st.Index();
         return st.Commit() ?? new ArrayMesh();
+    }
+
+    private MultiMesh CreateMultiMesh(ArrayMesh mesh)
+    {
+        return new MultiMesh
+        {
+            TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
+            UseColors = true,
+            UseCustomData = true,
+            InstanceCount = MaxInstances,
+            VisibleInstanceCount = 0,
+            Mesh = mesh
+        };
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

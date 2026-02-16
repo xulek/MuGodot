@@ -76,12 +76,18 @@ public class MuModelBuilder
     /// Convert a BMD model to a Godot ArrayMesh.
     /// Uses the selected action/frame position for bone transforms.
     /// </summary>
-    public ArrayMesh? BuildMesh(BMD bmd, int actionIndex = 0, float framePos = 0f, ArrayMesh? targetMesh = null)
+    public ArrayMesh? BuildMesh(
+        BMD bmd,
+        int actionIndex = 0,
+        float framePos = 0f,
+        ArrayMesh? targetMesh = null,
+        BMD? animationSourceBmd = null)
     {
         if (bmd.Meshes == null || bmd.Meshes.Length == 0)
             return null;
 
-        var boneMatrices = ComputeBoneMatrices(bmd, actionIndex, framePos);
+        var animationBmd = animationSourceBmd ?? bmd;
+        var boneMatrices = ComputeBoneMatrices(animationBmd, actionIndex, framePos);
 
         var arrayMesh = targetMesh ?? new ArrayMesh();
         arrayMesh.ClearSurfaces();

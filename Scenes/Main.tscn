@@ -2,18 +2,62 @@
 
 [ext_resource type="Script" uid="uid://cofufsmcuoyje" path="res://Scripts/Main.cs" id="1_main"]
 
-[node name="Main" type="Node3D" unique_id=609913852]
+[sub_resource type="Environment" id="Environment_r150o"]
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.58, 0.64, 0.72, 1)
+fog_light_energy = 1.1
+fog_density = 0.88
+fog_depth_curve = 3.2
+fog_depth_begin = 44.0
+fog_depth_end = 50.5
+
+[node name="Main" type="Node3D" unique_id=609913852 node_paths=PackedStringArray("_camera", "_sun", "_terrainRoot", "_objectsRoot", "_charactersRoot", "_worldEnvironment", "_musicPlayer", "_ambientPlayer")]
 script = ExtResource("1_main")
 LoadObjectsInEditor = true
 AnimateObjectsInEditor = true
 EditorAnimateFire = true
 EditorFireLightsWhenAnimationOff = true
+_camera = NodePath("Camera3D")
+_sun = NodePath("DirectionalLight3D")
+_terrainRoot = NodePath("Terrain")
+_objectsRoot = NodePath("Objects")
+_charactersRoot = NodePath("Characters")
+_cameraYaw = -0.7328638
+_cameraPitch = 2.3713787
+_cameraDistance = 17.0
+_targetCameraDistance = 17.0
+_cameraRotatePressed = false
+_cameraWasRotated = false
+_darkWizardRoot = null
+_darkWizardMesh = null
+_darkWizardIdleController = null
+_darkWizardWalkController = null
+_darkWizardMoving = false
+_darkWizardMoveTarget = Vector3(0, 0, 0)
+_previousMousePosition = Vector2(344, 699)
+_cameraFallbackTarget = Vector3(128, 0, -128)
+_worldEnvironment = NodePath("WorldEnvironment")
+_sceneEnvironment = SubResource("Environment_r150o")
+_musicPlayer = NodePath("MusicPlayer")
+_ambientPlayer = NodePath("AmbientPlayer")
+_lorenciaThemeMusic = null
+_lorenciaPubMusic = null
+_lorenciaAmbientWind = null
+_isInLorenciaPubArea = false
+_statusLabel = null
+_loading = false
+_editorOwnerSyncTimer = 30.532911
+_editorFxUpdateAccumulator = 0.033333335
+_objectCullingTimer = 0.0
+_distanceCullingResetPending = true
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=262076923]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 128, 30, -128)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 136, 11, -119)
 current = true
-fov = 60.0
-far = 1000.0
+fov = 35.0
+near = 0.099999994
+far = 36.0
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1330696658]
 transform = Transform3D(-4.371139e-08, -0.7071068, 0.7071067, 0, 0.7071067, 0.7071068, -1, 3.090862e-08, -3.0908616e-08, 0, 0, 0)

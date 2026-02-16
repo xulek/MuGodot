@@ -5,9 +5,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>MuGodot</RootNamespace>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Client.Data\**\*.cs" />
+    <Compile Include="Scripts\**\*.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="Client.Data\Client.Data.csproj" />

@@ -1,17 +1,44 @@
 using Godot;
 using MuGodot.Audio;
 using MuGodot.Objects.Worlds.Lorencia;
+using Client.Data.ATT;
+using Client.Data.BMD;
+using Client.Data.CAP;
 
 namespace MuGodot;
 
 /// <summary>
 /// Main scene controller for the MU Online Godot map viewer.
 /// Loads terrain, textures, and objects for a selected world.
-/// Provides a free-fly camera for exploring the scene.
+/// Spawns a controllable DarkWizard and uses MonoGame-style camera controls.
 /// </summary>
 [Tool]
 public partial class Main : Node3D
 {
+	private readonly record struct ObjectCullBounds(MeshInstance3D Mesh, Vector3 LocalCenter, float LocalRadius);
+
+	private const float MuToGodotScale = MuConfig.WorldToGodot;
+	private const float MonoGameMoveSpeed = 300f * MuToGodotScale;
+	private const float MonoGameCameraNear = 10f * MuToGodotScale;
+	private const float MonoGameCameraFar = (1800f + 1800f) * MuToGodotScale;
+	private const float MonoGameCameraMinDistance = 800f * MuToGodotScale;
+	private const float MonoGameCameraMaxDistance = 1800f * MuToGodotScale;
+	private const float MonoGameCameraDefaultDistance = 1700f * MuToGodotScale;
+	private static readonly float MonoGameCameraDefaultYaw = Mathf.DegToRad(-41.99f);
+	private static readonly float MonoGameCameraDefaultPitch = Mathf.DegToRad(135.87f);
+	private static readonly float MonoGameCameraMinPitch = Mathf.DegToRad(110f);
+	private static readonly float MonoGameCameraMaxPitch = Mathf.DegToRad(160f);
+	private const int DarkWizardIdleAction = 1;
+	private const int DarkWizardWalkAction = 15;
+	private static readonly string[] DarkWizardBodyPartPrefixes = new[]
+	{
+		"HelmClass",
+		"ArmorClass",
+		"PantClass",
+		"GloveClass",
+		"BootClass"
+	};
+
 	private static readonly Vector3 MonoGameSunDirectionMu = new Vector3(-1f, 0f, -1f).Normalized();
 	private static readonly Vector3 MonoGameTerrainLightDirectionMu = (-MonoGameSunDirectionMu).Normalized();
 	private static readonly Color MonoGameSunColor = new Color(1f, 0.95f, 0.85f, 1f);
@@ -49,6 +76,9 @@ public partial class Main : Node3D
 	[Export] public float GrassWindStrength { get; set; } = 1.0f;
 	[Export] public float GrassAlphaCutoff { get; set; } = 0.40f;
 	[Export] public float GrassDensityScale { get; set; } = 1.5f;
+	[Export] public float GrassRebuildMoveThreshold { get; set; } = 1.5f;
+	[Export] public bool GrassProgressiveRebuild { get; set; } = true;
+	[Export] public int GrassRebuildTilesPerFrame { get; set; } = 180;
 	[ExportGroup("Fog & Culling")]
 	[Export] public bool EnableDistanceFogAndObjectCulling { get; set; } = true;
 	[Export] public float FogAndCullingDistance { get; set; } = 52f; // Object culling distance.
@@ -58,6 +88,10 @@ public partial class Main : Node3D
 	[Export] public float FogMaxDensity { get; set; } = 0.88f;          // Depth fog max opacity.
 	[Export] public float ObjectCullingHysteresis { get; set; } = 2f;   // Reduces edge popping while moving.
 	[Export] public float ObjectCullingRefreshInterval { get; set; } = 0.10f;
+	[Export] public bool UseFrustumObjectCulling { get; set; } = true;
+	[Export] public float FrustumCullingMargin { get; set; } = 8f;
+	[Export] public int ObjectCullingBatchSize { get; set; } = 512;
+	[Export] public int AnimationCullingBatchSize { get; set; } = 128;
 	[Export] public Color DistanceFogColor { get; set; } = new Color(0.58f, 0.64f, 0.72f, 1f);
 	[ExportGroup("Audio")]
 	[Export] public bool EnableWorldAudio { get; set; } = true;
@@ -77,19 +111,53 @@ public partial class Main : Node3D
 	[Export] public float LorenciaLeafDensityScale { get; set; } = 1f;
 	[Export] public string LorenciaLeafTexturePath { get; set; } = "World1/leaf01.OZT";
 
-	// Camera
-	[Export] public float CameraMoveSpeed { get; set; } = 50f;
-	[Export] public float CameraFastMultiplier { get; set; } = 3f;
+	[ExportGroup("MonoGame Camera")]
 	[Export] public float CameraMouseSensitivity { get; set; } = 0.003f;
+	[Export] public float CameraZoomSpeed { get; set; } = 4f;
+	[Export] public float CameraMinDistance { get; set; } = MonoGameCameraMinDistance;
+	[Export] public float CameraMaxDistance { get; set; } = MonoGameCameraMaxDistance;
+	[Export] public float CameraDefaultDistance { get; set; } = MonoGameCameraDefaultDistance;
+	[Export] public float CameraDefaultYaw { get; set; } = MonoGameCameraDefaultYaw;
+	[Export] public float CameraDefaultPitch { get; set; } = MonoGameCameraDefaultPitch;
+	[Export] public float CameraFollowSmoothness { get; set; } = 14f;
+
+	[ExportGroup("DarkWizard")]
+	[Export] public string DarkWizardModelPath { get; set; } = "Player/Player.bmd"; // Skeleton/animation source
+	[Export] public int DarkWizardClassModelId { get; set; } = 1; // 1 = Dark Wizard
+	[Export] public float DarkWizardMoveSpeed { get; set; } = MonoGameMoveSpeed;
+	[Export] public float DarkWizardHeightOffset { get; set; } = 0f;
+	[Export] public float DarkWizardFacingOffsetDegrees { get; set; } = 0f;
+	[Export] public float DarkWizardTurnSmoothness { get; set; } = 16f;
+	[Export] public float DarkWizardAnimationSpeed { get; set; } = 6.25f;
+	[Export] public int DarkWizardSubFrameSamples { get; set; } = 8;
+	[Export] public bool DarkWizardRealtimeInterpolation { get; set; } = true;
 
 	private Camera3D _camera = null!;
 	private DirectionalLight3D _sun = null!;
 	private Node3D _terrainRoot = null!;
 	private Node3D _objectsRoot = null!;
+	private Node3D _charactersRoot = null!;
 
-	private float _cameraYaw;
-	private float _cameraPitch = -0.5f;
-	private bool _mouseCapture;
+	private float _cameraYaw = MonoGameCameraDefaultYaw;
+	private float _cameraPitch = MonoGameCameraDefaultPitch;
+	private float _cameraDistance = MonoGameCameraDefaultDistance;
+	private float _targetCameraDistance = MonoGameCameraDefaultDistance;
+	private bool _cameraRotatePressed;
+	private bool _cameraWasRotated;
+	private Vector3 _cameraSmoothedTarget;
+	private bool _cameraSmoothedTargetInitialized;
+
+	private Node3D? _darkWizardRoot;
+	private readonly List<MeshInstance3D> _darkWizardMeshes = new();
+	private readonly List<MuAnimatedMeshController> _darkWizardIdleControllers = new();
+	private readonly List<MuAnimatedMeshController> _darkWizardWalkControllers = new();
+	private bool _darkWizardMoving;
+	private Vector3 _darkWizardMoveTarget;
+	private readonly Queue<Vector2I> _darkWizardPath = new();
+	private float _darkWizardTargetYaw;
+	private bool _darkWizardHasTargetYaw;
+	private Vector2 _previousMousePosition;
+	private Vector3 _cameraFallbackTarget = new Vector3(128f, 0f, -128f);
 
 	private MuTerrainBuilder _terrainBuilder = null!;
 	private MuModelBuilder _modelBuilder = null!;
@@ -101,6 +169,7 @@ public partial class Main : Node3D
 	private Godot.Environment? _sceneEnvironment;
 	private HashSet<string>? _sceneEnvironmentProperties;
 	private readonly List<MeshInstance3D> _distanceCulledObjectInstances = new();
+	private readonly List<ObjectCullBounds> _distanceCulledObjectBounds = new();
 	private readonly List<MuAnimatedMeshController> _distanceCulledAnimationControllers = new();
 	private AudioStreamPlayer? _musicPlayer;
 	private AudioStreamPlayer? _ambientPlayer;
@@ -114,6 +183,8 @@ public partial class Main : Node3D
 	private float _editorOwnerSyncTimer;
 	private float _editorFxUpdateAccumulator;
 	private float _objectCullingTimer;
+	private int _objectCullingCursor;
+	private int _animationCullingCursor;
 	private bool _distanceCullingResetPending = true;
 
 	public override void _Ready()
@@ -128,11 +199,12 @@ public partial class Main : Node3D
 			_camera = new Camera3D();
 			AddChild(_camera);
 		}
-		_camera.Far = 1000f;
-		_camera.Fov = 60f;
-
-		// Position camera above terrain center looking down
-		_camera.Position = new Vector3(128, 30, -128);
+		_camera.Near = MonoGameCameraNear;
+		_camera.Far = MonoGameCameraFar;
+		_camera.Fov = 35f;
+		ResetCameraToMonoGameDefaults();
+		_camera.Position = _cameraFallbackTarget + new Vector3(8f, 11f, 9f);
+		_previousMousePosition = GetViewport().GetMousePosition();
 
 		// Setup directional light
 		_sun = GetNodeOrNull<DirectionalLight3D>("DirectionalLight3D");
@@ -148,8 +220,10 @@ public partial class Main : Node3D
 		// Setup container nodes
 		_terrainRoot = GetNodeOrNull<Node3D>("Terrain") ?? new Node3D { Name = "Terrain" };
 		_objectsRoot = GetNodeOrNull<Node3D>("Objects") ?? new Node3D { Name = "Objects" };
+		_charactersRoot = GetNodeOrNull<Node3D>("Characters") ?? new Node3D { Name = "Characters" };
 		if (_terrainRoot.GetParent() == null) AddChild(_terrainRoot);
 		if (_objectsRoot.GetParent() == null) AddChild(_objectsRoot);
+		if (_charactersRoot.GetParent() == null) AddChild(_charactersRoot);
 
 		// Setup UI
 		if (!isEditor)
@@ -194,7 +268,7 @@ public partial class Main : Node3D
 		helpLabel.Position = new Vector2(10, 680);
 		helpLabel.AddThemeColorOverride("font_color", new Color(1, 1, 0.7f));
 		helpLabel.AddThemeFontSizeOverride("font_size", 14);
-		helpLabel.Text = "WASD: Move | Shift: Fast | RMB: Look | Scroll: Speed | Esc: Release mouse";
+		helpLabel.Text = "LMB: Move DarkWizard | MMB drag: Rotate camera | MMB click: Reset camera | Wheel: Zoom";
 		canvas.AddChild(helpLabel);
 	}
 
@@ -218,11 +292,22 @@ public partial class Main : Node3D
 			_lorenciaLeafSystem?.Clear();
 			_lorenciaBirdSystem?.Clear();
 			_distanceCulledObjectInstances.Clear();
+			_distanceCulledObjectBounds.Clear();
 			_distanceCulledAnimationControllers.Clear();
 			_objectCullingTimer = 0f;
+			_objectCullingCursor = 0;
+			_animationCullingCursor = 0;
 			_distanceCullingResetPending = true;
 			ClearChildren(_terrainRoot);
 			ClearChildren(_objectsRoot);
+			ClearChildren(_charactersRoot);
+			_darkWizardRoot = null;
+			_darkWizardMeshes.Clear();
+			_darkWizardIdleControllers.Clear();
+			_darkWizardWalkControllers.Clear();
+			_darkWizardMoving = false;
+			_darkWizardPath.Clear();
+			_darkWizardHasTargetYaw = false;
 			StopWorldAudio();
 
 			// Load terrain data
@@ -246,6 +331,9 @@ public partial class Main : Node3D
 				_grassRenderer.WindStrength = Mathf.Clamp(GrassWindStrength, 0.1f, 3.0f);
 				_grassRenderer.AlphaCutoff = Mathf.Clamp(GrassAlphaCutoff, 0.05f, 0.95f);
 				_grassRenderer.DensityScale = Mathf.Clamp(GrassDensityScale, 0.1f, 2.0f);
+				_grassRenderer.RebuildCameraMoveThreshold = Mathf.Clamp(GrassRebuildMoveThreshold, 0.25f, 12.0f);
+				_grassRenderer.ProgressiveRebuild = GrassProgressiveRebuild;
+				_grassRenderer.RebuildTilesPerFrame = Math.Clamp(GrassRebuildTilesPerFrame, 16, 4000);
 				await _grassRenderer.BuildAsync(WorldIndex, _terrainRoot, GetGrassCameraPosition());
 			}
 			ExposeGeneratedNodesInEditor(_terrainRoot);
@@ -272,6 +360,8 @@ public partial class Main : Node3D
 			}
 
 			await ConfigureWorldAmbientSystemsAsync(WorldIndex);
+			if (!editorMode)
+				await SpawnDarkWizardAsync();
 
 			ConfigureWorldAudio(WorldIndex);
 			EnsureEditorSceneOwnership();
@@ -279,7 +369,7 @@ public partial class Main : Node3D
 			if (editorMode)
 				UpdateStatus($"Editor preview ready: World{WorldIndex}");
 			else
-				UpdateStatus($"World{WorldIndex} loaded! RMB to look around, WASD to move.");
+				UpdateStatus($"World{WorldIndex} loaded! DarkWizard ready (LMB move, MMB rotate/reset, wheel zoom).");
 		}
 		catch (System.Exception ex)
 		{
@@ -408,6 +498,7 @@ public partial class Main : Node3D
 		SetOwnerIfNeeded(_sun, editedSceneRoot);
 		SetOwnerIfNeeded(_terrainRoot, editedSceneRoot);
 		SetOwnerIfNeeded(_objectsRoot, editedSceneRoot);
+		SetOwnerIfNeeded(_charactersRoot, editedSceneRoot);
 		SetOwnerIfNeeded(_musicPlayer, editedSceneRoot);
 		SetOwnerIfNeeded(_ambientPlayer, editedSceneRoot);
 	}
@@ -434,30 +525,69 @@ public partial class Main : Node3D
 
 		if (@event is InputEventMouseButton mouseButton)
 		{
-			if (mouseButton.ButtonIndex == MouseButton.Right)
+			if (mouseButton.ButtonIndex == MouseButton.Middle)
 			{
-				_mouseCapture = mouseButton.Pressed;
-				Input.MouseMode = _mouseCapture ? Input.MouseModeEnum.Captured : Input.MouseModeEnum.Visible;
+				if (mouseButton.Pressed)
+				{
+					_cameraRotatePressed = true;
+					_cameraWasRotated = false;
+					_previousMousePosition = mouseButton.Position;
+				}
+				else if (_cameraRotatePressed)
+				{
+					if (!_cameraWasRotated)
+						ResetCameraToMonoGameDefaults();
+
+					_cameraRotatePressed = false;
+					_cameraWasRotated = false;
+				}
 			}
 
-			// Scroll to adjust speed
+			if (!mouseButton.Pressed)
+				return;
+
 			if (mouseButton.ButtonIndex == MouseButton.WheelUp)
-				CameraMoveSpeed = Mathf.Min(CameraMoveSpeed * 1.2f, 500f);
+			{
+				_targetCameraDistance = Mathf.Clamp(
+					_targetCameraDistance - (100f * MuToGodotScale),
+					Mathf.Min(CameraMinDistance, CameraMaxDistance),
+					Mathf.Max(CameraMinDistance, CameraMaxDistance));
+			}
 			else if (mouseButton.ButtonIndex == MouseButton.WheelDown)
-				CameraMoveSpeed = Mathf.Max(CameraMoveSpeed / 1.2f, 5f);
+			{
+				_targetCameraDistance = Mathf.Clamp(
+					_targetCameraDistance + (100f * MuToGodotScale),
+					Mathf.Min(CameraMinDistance, CameraMaxDistance),
+					Mathf.Max(CameraMinDistance, CameraMaxDistance));
+			}
+			else if (mouseButton.ButtonIndex == MouseButton.Left)
+			{
+				TrySetDarkWizardMoveTarget(mouseButton.Position);
+			}
 		}
 
-		if (@event is InputEventMouseMotion mouseMotion && _mouseCapture)
+		if (@event is InputEventMouseMotion mouseMotion)
 		{
-			_cameraYaw -= mouseMotion.Relative.X * CameraMouseSensitivity;
-			_cameraPitch -= mouseMotion.Relative.Y * CameraMouseSensitivity;
-			_cameraPitch = Mathf.Clamp(_cameraPitch, Mathf.DegToRad(-89f), Mathf.DegToRad(89f));
-		}
+			if (_cameraRotatePressed)
+			{
+				var delta = mouseMotion.Position - _previousMousePosition;
+				_previousMousePosition = mouseMotion.Position;
 
-		if (@event is InputEventKey keyEvent && keyEvent.Keycode == Key.Escape)
-		{
-			_mouseCapture = false;
-			Input.MouseMode = Input.MouseModeEnum.Visible;
+				if (delta.LengthSquared() > 0f)
+				{
+					_cameraYaw -= delta.X * CameraMouseSensitivity;
+					_cameraPitch = Mathf.Clamp(
+						_cameraPitch - delta.Y * CameraMouseSensitivity,
+						MonoGameCameraMinPitch,
+						MonoGameCameraMaxPitch);
+					_cameraYaw = WrapAngle(_cameraYaw);
+					_cameraWasRotated = true;
+				}
+			}
+			else
+			{
+				_previousMousePosition = mouseMotion.Position;
+			}
 		}
 	}
 
@@ -466,6 +596,12 @@ public partial class Main : Node3D
 		ApplyEditorPerformanceSettings();
 
 		bool isEditor = Engine.IsEditorHint();
+		if (!isEditor)
+		{
+			UpdateDarkWizardMovement(delta);
+			UpdateMonoGameCamera(delta);
+		}
+
 		Vector3 cameraPosition = GetGrassCameraPosition();
 		UpdateDistanceFogAndObjectCulling(delta, cameraPosition);
 
@@ -513,30 +649,698 @@ public partial class Main : Node3D
 		_lorenciaLeafSystem?.Update(delta, _camera.Position, _camera.Position);
 		_lorenciaBirdSystem?.Update(delta, _camera.Position);
 		UpdateWorldAudio();
+	}
 
-		// Update camera rotation
-		_camera.Rotation = new Vector3(_cameraPitch, _cameraYaw, 0);
+	private async Task SpawnDarkWizardAsync()
+	{
+		if (_charactersRoot == null || !GodotObject.IsInstanceValid(_charactersRoot))
+			return;
 
-		// Camera movement
-		float speed = CameraMoveSpeed * (float)delta;
-		if (Input.IsKeyPressed(Key.Shift))
-			speed *= CameraFastMultiplier;
+		ClearChildren(_charactersRoot);
+		_darkWizardRoot = null;
+		_darkWizardMeshes.Clear();
+		_darkWizardIdleControllers.Clear();
+		_darkWizardWalkControllers.Clear();
+		_darkWizardMoving = false;
+		_darkWizardPath.Clear();
+		_darkWizardHasTargetYaw = false;
 
-		var forward = -_camera.GlobalTransform.Basis.Z;
-		var right = _camera.GlobalTransform.Basis.X;
-		var up = Vector3.Up;
+		var spawn = await ResolveDarkWizardSpawnPositionAsync();
+		_cameraFallbackTarget = spawn;
 
-		var velocity = Vector3.Zero;
+		var root = new Node3D { Name = "DarkWizard" };
+		_charactersRoot.AddChild(root);
+		_darkWizardRoot = root;
 
-		if (Input.IsKeyPressed(Key.W)) velocity += forward;
-		if (Input.IsKeyPressed(Key.S)) velocity -= forward;
-		if (Input.IsKeyPressed(Key.D)) velocity += right;
-		if (Input.IsKeyPressed(Key.A)) velocity -= right;
-		if (Input.IsKeyPressed(Key.E) || Input.IsKeyPressed(Key.Space)) velocity += up;
-		if (Input.IsKeyPressed(Key.Q) || Input.IsKeyPressed(Key.Ctrl)) velocity -= up;
+		BMD? skeletonBmd = await _modelBuilder.LoadBmdAsync(DarkWizardModelPath);
+		if (skeletonBmd == null)
+		{
+			GD.PrintErr($"[DarkWizard] BMD not found: {DarkWizardModelPath}. Using fallback mesh.");
+			var meshInstance = new MeshInstance3D { Name = "FallbackBody" };
+			root.AddChild(meshInstance);
+			_darkWizardMeshes.Add(meshInstance);
+			ApplyDarkWizardFallbackMesh(meshInstance);
+			_darkWizardRoot.Position = spawn;
+			_darkWizardMoveTarget = spawn;
+			_darkWizardPath.Clear();
+			_darkWizardTargetYaw = _darkWizardRoot.Rotation.Y;
+			_darkWizardHasTargetYaw = true;
+			ResetCameraToMonoGameDefaults();
+			UpdateMonoGameCamera(0d);
+			UpdateStatus("DarkWizard model missing (using fallback).");
+			return;
+		}
 
-		if (velocity.LengthSquared() > 0)
-			_camera.Position += velocity.Normalized() * speed;
+		int idleAction = ClampActionIndex(skeletonBmd, DarkWizardIdleAction);
+		int walkAction = ClampActionIndex(skeletonBmd, DarkWizardWalkAction);
+		int classId = Math.Max(1, DarkWizardClassModelId);
+		int subFrameSamples = Math.Clamp(DarkWizardSubFrameSamples, 1, 32);
+		float animationSyncStartSeconds = Time.GetTicksMsec() * 0.001f;
+		bool hasRenderablePart = false;
+
+		for (int i = 0; i < DarkWizardBodyPartPrefixes.Length; i++)
+		{
+			string prefix = DarkWizardBodyPartPrefixes[i];
+			string partModelPath = BuildDarkWizardPartModelPath(prefix, classId);
+			BMD? partBmd = await _modelBuilder.LoadBmdAsync(partModelPath, logMissing: false);
+			if (partBmd == null)
+				continue;
+
+			var materials = await _modelBuilder.LoadModelTexturesAsync(partModelPath);
+			var meshInstance = new MeshInstance3D { Name = prefix };
+			root.AddChild(meshInstance);
+			_darkWizardMeshes.Add(meshInstance);
+
+			var idleController = CreateDarkWizardAnimationController(
+				root,
+				partBmd,
+				materials,
+				idleAction,
+				$"{prefix}_Idle",
+				skeletonBmd,
+				subFrameSamples,
+				animationSyncStartSeconds);
+			var idleMesh = idleController.GetCurrentMesh();
+			if (idleMesh == null)
+			{
+				idleController.QueueFree();
+				meshInstance.QueueFree();
+				_darkWizardMeshes.Remove(meshInstance);
+				continue;
+			}
+
+			idleController.RegisterInstance(meshInstance);
+			meshInstance.Mesh = idleMesh;
+			_darkWizardIdleControllers.Add(idleController);
+
+			if (walkAction != idleAction)
+			{
+				var walkController = CreateDarkWizardAnimationController(
+					root,
+					partBmd,
+					materials,
+					walkAction,
+					$"{prefix}_Walk",
+					skeletonBmd,
+					subFrameSamples,
+					animationSyncStartSeconds);
+				var walkMesh = walkController.GetCurrentMesh();
+				if (walkMesh != null)
+				{
+					walkController.RegisterInstance(meshInstance);
+					_darkWizardWalkControllers.Add(walkController);
+				}
+				else
+				{
+					walkController.QueueFree();
+				}
+			}
+
+			hasRenderablePart = true;
+		}
+
+		if (!hasRenderablePart)
+		{
+			GD.PrintErr($"[DarkWizard] No class body parts found for class {classId}. Using fallback mesh.");
+			var meshInstance = new MeshInstance3D { Name = "FallbackBody" };
+			root.AddChild(meshInstance);
+			_darkWizardMeshes.Add(meshInstance);
+			ApplyDarkWizardFallbackMesh(meshInstance);
+			_darkWizardRoot.Position = spawn;
+			_darkWizardMoveTarget = spawn;
+			_darkWizardPath.Clear();
+			_darkWizardTargetYaw = _darkWizardRoot.Rotation.Y;
+			_darkWizardHasTargetYaw = true;
+			ResetCameraToMonoGameDefaults();
+			UpdateMonoGameCamera(0d);
+			UpdateStatus("DarkWizard class models missing (using fallback).");
+			return;
+		}
+
+		_darkWizardRoot.Position = spawn;
+		_darkWizardMoveTarget = spawn;
+		_darkWizardPath.Clear();
+		_darkWizardTargetYaw = _darkWizardRoot.Rotation.Y;
+		_darkWizardHasTargetYaw = true;
+		SetDarkWizardAnimationState(isMoving: false, force: true);
+		ResetCameraToMonoGameDefaults();
+		UpdateMonoGameCamera(0d);
+		GD.Print($"[DarkWizard] Spawned at {spawn}. Parts: {_darkWizardMeshes.Count}, walk controllers: {_darkWizardWalkControllers.Count}");
+	}
+
+	private MuAnimatedMeshController CreateDarkWizardAnimationController(
+		Node3D parent,
+		BMD bmd,
+		StandardMaterial3D[] materials,
+		int actionIndex,
+		string suffix,
+		BMD? animationSourceBmd = null,
+		int subFrameSamples = 8,
+		float? syncStartTimeSeconds = null)
+	{
+		var controller = new MuAnimatedMeshController
+		{
+			Name = $"DarkWizard{suffix}"
+		};
+
+		parent.AddChild(controller);
+		controller.Initialize(
+			_modelBuilder,
+			bmd,
+			materials,
+			actionIndex: actionIndex,
+			animationSpeed: DarkWizardAnimationSpeed,
+			subFrameSamples: subFrameSamples,
+			animationSourceBmd: animationSourceBmd,
+			syncStartTimeSeconds: syncStartTimeSeconds,
+			useRealtimeInterpolation: DarkWizardRealtimeInterpolation);
+		controller.SetExternalAnimationEnabled(false);
+		return controller;
+	}
+
+	private static string BuildDarkWizardPartModelPath(string prefix, int classId)
+	{
+		string suffix = classId.ToString("D2");
+		return $"Player/{prefix}{suffix}.bmd";
+	}
+
+	private static int ClampActionIndex(BMD bmd, int requestedAction)
+	{
+		if (bmd.Actions == null || bmd.Actions.Length == 0)
+			return 0;
+
+		return Math.Clamp(requestedAction, 0, bmd.Actions.Length - 1);
+	}
+
+	private static void ApplyDarkWizardFallbackMesh(MeshInstance3D meshInstance)
+	{
+		var capsule = new CapsuleMesh
+		{
+			Radius = 0.30f,
+			Height = 0.95f
+		};
+
+		var material = new StandardMaterial3D
+		{
+			AlbedoColor = new Color(0.20f, 0.23f, 0.42f),
+			Metallic = 0.15f,
+			Roughness = 0.72f
+		};
+
+		meshInstance.Mesh = capsule;
+		meshInstance.MaterialOverride = material;
+	}
+
+	private async Task<Vector3> ResolveDarkWizardSpawnPositionAsync()
+	{
+		string capPath = System.IO.Path.Combine(DataPath, $"World{WorldIndex}", "Camera_Angle_Position.bmd");
+		if (System.IO.File.Exists(capPath))
+		{
+			try
+			{
+				var capData = await new CAPReader().Load(capPath);
+				float x = capData.HeroPosition.X * MuToGodotScale;
+				float y = capData.HeroPosition.Y * MuToGodotScale;
+				float sampleX = Mathf.Clamp(x, 0f, MuConfig.TerrainSize - 1f);
+				float sampleY = Mathf.Clamp(y, 0f, MuConfig.TerrainSize - 1f);
+				float terrainHeight = _terrainBuilder.GetHeightInterpolated(sampleX, sampleY) + DarkWizardHeightOffset;
+				return new Vector3(sampleX, terrainHeight, -sampleY);
+			}
+			catch (System.Exception ex)
+			{
+				GD.PrintErr($"[DarkWizard] Failed to read CAP spawn: {ex.Message}");
+			}
+		}
+
+		float centerX = MuConfig.TerrainSize * 0.5f;
+		float centerY = MuConfig.TerrainSize * 0.5f;
+		float h = _terrainBuilder.GetHeightInterpolated(centerX, centerY) + DarkWizardHeightOffset;
+		return new Vector3(centerX, h, -centerY);
+	}
+
+	private void TrySetDarkWizardMoveTarget(Vector2 mousePosition)
+	{
+		if (_darkWizardRoot == null || !GodotObject.IsInstanceValid(_darkWizardRoot))
+			return;
+
+		if (!TryRaycastTerrain(mousePosition, out var hitPos))
+			return;
+
+		int tileX = Math.Clamp((int)MathF.Floor(hitPos.X), 0, MuConfig.TerrainSize - 1);
+		int tileY = Math.Clamp((int)MathF.Floor(-hitPos.Z), 0, MuConfig.TerrainSize - 1);
+		if (!IsTileWalkable(tileX, tileY))
+			return;
+
+		int startX = Math.Clamp((int)MathF.Floor(_darkWizardRoot.Position.X), 0, MuConfig.TerrainSize - 1);
+		int startY = Math.Clamp((int)MathF.Floor(-_darkWizardRoot.Position.Z), 0, MuConfig.TerrainSize - 1);
+		var startTile = new Vector2I(startX, startY);
+		var targetTile = new Vector2I(tileX, tileY);
+
+		var path = FindPath(startTile, targetTile);
+		if (path.Count == 0)
+			return;
+
+		_darkWizardPath.Clear();
+		for (int i = 0; i < path.Count; i++)
+			_darkWizardPath.Enqueue(path[i]);
+
+		// Skip zero-length/invalid first nodes so movement can't get stuck in walk state.
+		if (!AdvanceDarkWizardPath(_darkWizardRoot.Position))
+			SetDarkWizardAnimationState(isMoving: false, force: true);
+	}
+
+	private bool TryRaycastTerrain(Vector2 mousePosition, out Vector3 hitPosition)
+	{
+		hitPosition = Vector3.Zero;
+		if (_camera == null || !GodotObject.IsInstanceValid(_camera))
+			return false;
+
+		Vector3 rayOrigin = _camera.ProjectRayOrigin(mousePosition);
+		Vector3 rayDir = _camera.ProjectRayNormal(mousePosition);
+		if (rayDir.LengthSquared() < 0.0001f)
+			return false;
+		rayDir = rayDir.Normalized();
+
+		const float maxDistance = 512f;
+		const float coarseStep = 1f;
+		const float fineStep = 0.1f;
+
+		float traveled = 0f;
+		Vector3 lastPos = rayOrigin;
+		if (!TryGetTerrainHeightAtWorld(lastPos.X, lastPos.Z, out float lastTerrainY))
+			return false;
+		float lastDiff = lastPos.Y - lastTerrainY;
+
+		while (traveled < maxDistance)
+		{
+			traveled += coarseStep;
+			Vector3 pos = rayOrigin + (rayDir * traveled);
+			if (!TryGetTerrainHeightAtWorld(pos.X, pos.Z, out float terrainY))
+				continue;
+
+			float diff = pos.Y - terrainY;
+			if (lastDiff > 0f && diff <= 0f)
+			{
+				float segmentStart = traveled - coarseStep;
+				float refine = segmentStart;
+				Vector3 refineLastPos = rayOrigin + (rayDir * segmentStart);
+				if (!TryGetTerrainHeightAtWorld(refineLastPos.X, refineLastPos.Z, out float refineLastTerrainY))
+					return false;
+				float refineLastDiff = refineLastPos.Y - refineLastTerrainY;
+
+				while (refine < traveled)
+				{
+					refine += fineStep;
+					Vector3 refinePos = rayOrigin + (rayDir * refine);
+					if (!TryGetTerrainHeightAtWorld(refinePos.X, refinePos.Z, out float refineTerrainY))
+						continue;
+
+					float refineDiff = refinePos.Y - refineTerrainY;
+					if (refineLastDiff > 0f && refineDiff <= 0f)
+					{
+						float t = refineLastDiff / (refineLastDiff - refineDiff);
+						hitPosition = refineLastPos.Lerp(refinePos, t);
+						return true;
+					}
+
+					refineLastPos = refinePos;
+					refineLastDiff = refineDiff;
+				}
+			}
+
+			lastPos = pos;
+			lastDiff = diff;
+		}
+
+		return false;
+	}
+
+	private void UpdateDarkWizardMovement(double delta)
+	{
+		if (_darkWizardRoot == null || !GodotObject.IsInstanceValid(_darkWizardRoot))
+			return;
+
+		var current = _darkWizardRoot.Position;
+		const float moveEpsilon = 0.01f;
+		float stepRemaining = MathF.Max(0.1f, DarkWizardMoveSpeed) * (float)delta;
+		Vector2 lastMoveDir = Vector2.Zero;
+		bool movedThisFrame = false;
+		int guard = 0;
+
+		// Consume full movement step even when crossing multiple path nodes in a single frame.
+		while (stepRemaining > 0f && guard++ < 64)
+		{
+			Vector2 moveDir = new Vector2(
+				_darkWizardMoveTarget.X - current.X,
+				_darkWizardMoveTarget.Z - current.Z);
+			float distance = moveDir.Length();
+
+			if (!float.IsFinite(distance))
+			{
+				if (!AdvanceDarkWizardPath(current))
+					break;
+				continue;
+			}
+
+			if (distance <= moveEpsilon)
+			{
+				if (!AdvanceDarkWizardPath(current))
+					break;
+				continue;
+			}
+
+			Vector2 dir = moveDir / distance;
+			float travel = MathF.Min(distance, stepRemaining);
+			current.X += dir.X * travel;
+			current.Z += dir.Y * travel;
+			stepRemaining -= travel;
+			lastMoveDir = dir;
+			movedThisFrame = true;
+
+			// Snap and continue with remaining step to avoid one-frame pauses on tile boundaries.
+			if (travel + moveEpsilon >= distance)
+			{
+				current.X = _darkWizardMoveTarget.X;
+				current.Z = _darkWizardMoveTarget.Z;
+				if (!AdvanceDarkWizardPath(current))
+					_darkWizardMoveTarget = current;
+			}
+			else
+			{
+				break;
+			}
+		}
+
+		if (movedThisFrame && lastMoveDir.LengthSquared() > 0f)
+			SetDarkWizardFacingTarget(lastMoveDir);
+
+		if (TryGetTerrainHeightAtWorld(current.X, current.Z, out float height))
+			current.Y = height + DarkWizardHeightOffset;
+
+		_darkWizardRoot.Position = current;
+		ApplyDarkWizardFacingInterpolation(delta);
+
+		Vector2 remaining = new Vector2(
+			_darkWizardMoveTarget.X - current.X,
+			_darkWizardMoveTarget.Z - current.Z);
+		float remainingDistance = remaining.Length();
+		bool isMoving = float.IsFinite(remainingDistance) &&
+			(remainingDistance > moveEpsilon || _darkWizardPath.Count > 0);
+		SetDarkWizardAnimationState(isMoving);
+	}
+
+	private void SetMoveTargetFromTile(Vector2I tile)
+	{
+		int clampedTileX = Math.Clamp(tile.X, 0, MuConfig.TerrainSize - 1);
+		int clampedTileY = Math.Clamp(tile.Y, 0, MuConfig.TerrainSize - 1);
+		float targetX = Mathf.Clamp(clampedTileX + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float targetY = Mathf.Clamp(clampedTileY + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+
+		float terrainHeightBase;
+		if (!TryGetTerrainHeightAtWorld(targetX, -targetY, out terrainHeightBase))
+			terrainHeightBase = _darkWizardRoot != null && GodotObject.IsInstanceValid(_darkWizardRoot)
+				? _darkWizardRoot.Position.Y - DarkWizardHeightOffset
+				: 0f;
+
+		float worldY = terrainHeightBase + DarkWizardHeightOffset;
+		_darkWizardMoveTarget = new Vector3(targetX, worldY, -targetY);
+	}
+
+	private bool AdvanceDarkWizardPath(Vector3 currentPosition)
+	{
+		const float minDistanceSq = 0.0001f; // 0.01^2
+		while (_darkWizardPath.Count > 0)
+		{
+			var nextTile = _darkWizardPath.Dequeue();
+			SetMoveTargetFromTile(nextTile);
+			if (!IsFiniteVector3(_darkWizardMoveTarget))
+				continue;
+
+			var delta = new Vector2(
+				_darkWizardMoveTarget.X - currentPosition.X,
+				_darkWizardMoveTarget.Z - currentPosition.Z);
+			if (delta.LengthSquared() > minDistanceSq)
+				return true;
+		}
+
+		_darkWizardMoveTarget = currentPosition;
+		return false;
+	}
+
+	private void SetDarkWizardFacingTarget(Vector2 moveDir)
+	{
+		if (moveDir.LengthSquared() <= 0.000001f)
+			return;
+
+		_darkWizardTargetYaw = MathF.Atan2(moveDir.X, moveDir.Y) + Mathf.DegToRad(DarkWizardFacingOffsetDegrees);
+		_darkWizardHasTargetYaw = true;
+	}
+
+	private void ApplyDarkWizardFacingInterpolation(double delta)
+	{
+		if (_darkWizardRoot == null || !GodotObject.IsInstanceValid(_darkWizardRoot) || !_darkWizardHasTargetYaw)
+			return;
+
+		float currentYaw = _darkWizardRoot.Rotation.Y;
+		float targetYaw = _darkWizardTargetYaw;
+		float smoothness = MathF.Max(0f, DarkWizardTurnSmoothness);
+		float nextYaw;
+
+		if (smoothness <= 0.001f)
+		{
+			nextYaw = targetYaw;
+		}
+		else
+		{
+			float t = 1f - MathF.Exp(-smoothness * (float)delta);
+			nextYaw = Mathf.LerpAngle(currentYaw, targetYaw, Mathf.Clamp(t, 0f, 1f));
+		}
+
+		var rotation = _darkWizardRoot.Rotation;
+		rotation.Y = WrapAngle(nextYaw);
+		_darkWizardRoot.Rotation = rotation;
+	}
+
+	private static bool IsFiniteVector3(Vector3 v)
+	{
+		return float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+	}
+
+	private List<Vector2I> FindPath(Vector2I start, Vector2I target)
+	{
+		if (start == target)
+			return new List<Vector2I> { target };
+
+		var frontier = new PriorityQueue<Vector2I, float>();
+		var cameFrom = new Dictionary<Vector2I, Vector2I>();
+		var gScore = new Dictionary<Vector2I, float> { [start] = 0f };
+		frontier.Enqueue(start, 0f);
+
+		Vector2I[] neighbors = new Vector2I[]
+		{
+			new Vector2I(1, 0),
+			new Vector2I(-1, 0),
+			new Vector2I(0, 1),
+			new Vector2I(0, -1),
+			new Vector2I(1, 1),
+			new Vector2I(1, -1),
+			new Vector2I(-1, 1),
+			new Vector2I(-1, -1)
+		};
+
+		const int maxVisitedNodes = 4000;
+		int visited = 0;
+
+		while (frontier.Count > 0 && visited < maxVisitedNodes)
+		{
+			visited++;
+			Vector2I current = frontier.Dequeue();
+			if (current == target)
+				break;
+
+			float currentG = gScore[current];
+			for (int i = 0; i < neighbors.Length; i++)
+			{
+				Vector2I n = current + neighbors[i];
+				if (!IsTileInBounds(n) || !IsTileWalkable(n.X, n.Y))
+					continue;
+
+				bool diagonal = neighbors[i].X != 0 && neighbors[i].Y != 0;
+				if (diagonal)
+				{
+					// Avoid cutting through blocked corners.
+					var sideA = new Vector2I(current.X + neighbors[i].X, current.Y);
+					var sideB = new Vector2I(current.X, current.Y + neighbors[i].Y);
+					if (!IsTileInBounds(sideA) || !IsTileInBounds(sideB))
+						continue;
+					if (!IsTileWalkable(sideA.X, sideA.Y) || !IsTileWalkable(sideB.X, sideB.Y))
+						continue;
+				}
+
+				float moveCost = diagonal ? 1.4142135f : 1f;
+				float tentativeG = currentG + moveCost;
+				if (gScore.TryGetValue(n, out float knownG) && tentativeG >= knownG)
+					continue;
+
+				gScore[n] = tentativeG;
+				cameFrom[n] = current;
+				float f = tentativeG + HeuristicCost(n, target);
+				frontier.Enqueue(n, f);
+			}
+		}
+
+		if (!cameFrom.ContainsKey(target))
+			return new List<Vector2I>();
+
+		var path = new List<Vector2I>();
+		Vector2I node = target;
+		path.Add(node);
+		while (node != start && cameFrom.TryGetValue(node, out var parent))
+		{
+			node = parent;
+			path.Add(node);
+		}
+		path.Reverse();
+
+		// Skip start tile to avoid zero-length first move.
+		if (path.Count > 0 && path[0] == start)
+			path.RemoveAt(0);
+
+		return path;
+	}
+
+	private static float HeuristicCost(Vector2I from, Vector2I to)
+	{
+		float dx = MathF.Abs(from.X - to.X);
+		float dy = MathF.Abs(from.Y - to.Y);
+		return MathF.Max(dx, dy);
+	}
+
+	private static bool IsTileInBounds(Vector2I tile)
+	{
+		return tile.X >= 0 &&
+			   tile.Y >= 0 &&
+			   tile.X < MuConfig.TerrainSize &&
+			   tile.Y < MuConfig.TerrainSize;
+	}
+
+	private void SetDarkWizardAnimationState(bool isMoving, bool force = false)
+	{
+		if (!force && _darkWizardMoving == isMoving)
+			return;
+
+		_darkWizardMoving = isMoving;
+		bool hasWalkControllers = _darkWizardWalkControllers.Count > 0;
+
+		for (int i = 0; i < _darkWizardIdleControllers.Count; i++)
+		{
+			var controller = _darkWizardIdleControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			controller.SetExternalAnimationEnabled(!isMoving || !hasWalkControllers);
+		}
+
+		for (int i = 0; i < _darkWizardWalkControllers.Count; i++)
+		{
+			var controller = _darkWizardWalkControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			controller.SetExternalAnimationEnabled(isMoving);
+		}
+	}
+
+	private bool IsTileWalkable(int x, int y)
+	{
+		var flags = _terrainBuilder.GetTerrainFlagsAt(x, y);
+		return (flags & TWFlags.NoMove) == 0;
+	}
+
+	private bool TryGetTerrainHeightAtWorld(float worldX, float worldZ, out float terrainY)
+	{
+		float tileX = worldX;
+		float tileY = -worldZ;
+		if (tileX < 0f || tileY < 0f || tileX >= MuConfig.TerrainSize || tileY >= MuConfig.TerrainSize)
+		{
+			terrainY = 0f;
+			return false;
+		}
+
+		terrainY = _terrainBuilder.GetHeightInterpolated(tileX, tileY);
+		return true;
+	}
+
+	private void UpdateMonoGameCamera(double delta)
+	{
+		if (_camera == null || !GodotObject.IsInstanceValid(_camera))
+			return;
+
+		_targetCameraDistance = Mathf.Clamp(
+			_targetCameraDistance,
+			Mathf.Min(CameraMinDistance, CameraMaxDistance),
+			Mathf.Max(CameraMinDistance, CameraMaxDistance));
+		_cameraDistance = Mathf.Lerp(
+			_cameraDistance,
+			_targetCameraDistance,
+			Mathf.Clamp(CameraZoomSpeed, 0.01f, 30f) * (float)delta);
+		_cameraDistance = Mathf.Clamp(
+			_cameraDistance,
+			Mathf.Min(CameraMinDistance, CameraMaxDistance),
+			Mathf.Max(CameraMinDistance, CameraMaxDistance));
+
+		Vector3 targetRaw = GetCameraTargetPosition();
+		if (!_cameraSmoothedTargetInitialized)
+		{
+			_cameraSmoothedTarget = targetRaw;
+			_cameraSmoothedTargetInitialized = true;
+		}
+
+		float followSmoothness = MathF.Max(0f, CameraFollowSmoothness);
+		if (followSmoothness <= 0.001f)
+		{
+			_cameraSmoothedTarget = targetRaw;
+		}
+		else
+		{
+			float t = 1f - MathF.Exp(-followSmoothness * (float)delta);
+			_cameraSmoothedTarget = _cameraSmoothedTarget.Lerp(targetRaw, Mathf.Clamp(t, 0f, 1f));
+		}
+
+		Vector3 target = _cameraSmoothedTarget;
+		Vector3 offset = ComputeMonoGameCameraOffset(_cameraDistance, _cameraYaw, _cameraPitch);
+		_camera.GlobalPosition = target + offset;
+		_camera.LookAt(target, Vector3.Up);
+	}
+
+	private Vector3 GetCameraTargetPosition()
+	{
+		if (_darkWizardRoot != null && GodotObject.IsInstanceValid(_darkWizardRoot))
+			return _darkWizardRoot.GlobalPosition;
+
+		return _cameraFallbackTarget;
+	}
+
+	private static Vector3 ComputeMonoGameCameraOffset(float distance, float yaw, float pitch)
+	{
+		float x = distance * MathF.Cos(pitch) * MathF.Sin(yaw);
+		float y = distance * MathF.Cos(pitch) * MathF.Cos(yaw);
+		float z = distance * MathF.Sin(pitch);
+		return new Vector3(x, z, -y);
+	}
+
+	private void ResetCameraToMonoGameDefaults()
+	{
+		_cameraYaw = CameraDefaultYaw;
+		_cameraPitch = Mathf.Clamp(CameraDefaultPitch, MonoGameCameraMinPitch, MonoGameCameraMaxPitch);
+		_cameraDistance = CameraDefaultDistance;
+		_targetCameraDistance = CameraDefaultDistance;
+		_cameraSmoothedTargetInitialized = false;
+	}
+
+	private static float WrapAngle(float angle)
+	{
+		return Mathf.Wrap(angle, -Mathf.Pi, Mathf.Pi);
 	}
 
 	private Vector3 GetGrassCameraPosition()
@@ -631,12 +1435,84 @@ public partial class Main : Node3D
 		float maxDistance = MathF.Max(10f, FogAndCullingDistance);
 		float maxDistanceSq = maxDistance * maxDistance;
 		float hysteresis = MathF.Max(0f, ObjectCullingHysteresis);
-		float showDistance = MathF.Max(1f, maxDistance - hysteresis);
-		float showDistanceSq = showDistance * showDistance;
-
-		for (int i = 0; i < _distanceCulledObjectInstances.Count; i++)
+		bool useFrustum = UseFrustumObjectCulling && _camera != null && GodotObject.IsInstanceValid(_camera);
+		float frustumShowMargin = MathF.Max(0f, FrustumCullingMargin);
+		float frustumHideMargin = frustumShowMargin + hysteresis;
+		Godot.Collections.Array<Plane>? frustumPlanes = useFrustum ? _camera!.GetFrustum() : null;
+		float[]? frustumPlaneSigns = null;
+		if (useFrustum && frustumPlanes != null && frustumPlanes.Count > 0)
 		{
-			var mesh = _distanceCulledObjectInstances[i];
+			Vector3 insidePoint = GetFrustumInsideSamplePoint(_camera!);
+			frustumPlaneSigns = BuildFrustumPlaneSigns(frustumPlanes, insidePoint);
+		}
+
+		if (useFrustum && frustumPlanes != null && frustumPlanes.Count > 0 && frustumPlaneSigns != null)
+		{
+			ProcessFrustumObjectCullingBatch(
+				frustumPlanes,
+				frustumPlaneSigns,
+				frustumShowMargin,
+				frustumHideMargin);
+		}
+		else
+		{
+			float showDistance = MathF.Max(1f, maxDistance - hysteresis);
+			float showDistanceSq = showDistance * showDistance;
+			ProcessDistanceObjectCullingBatch(cameraPosition, maxDistanceSq, showDistanceSq);
+		}
+
+		ProcessAnimationCullingBatch(cameraPosition, maxDistanceSq, useFrustum);
+	}
+
+	private void ProcessFrustumObjectCullingBatch(
+		Godot.Collections.Array<Plane> frustumPlanes,
+		float[] frustumPlaneSigns,
+		float showMargin,
+		float hideMargin)
+	{
+		int total = _distanceCulledObjectBounds.Count;
+		if (total <= 0)
+			return;
+
+		int batch = ResolveCullingBatchSize(total, ObjectCullingBatchSize);
+		if (_objectCullingCursor >= total)
+			_objectCullingCursor = 0;
+
+		for (int n = 0; n < batch; n++)
+		{
+			int idx = (_objectCullingCursor + n) % total;
+			var bounds = _distanceCulledObjectBounds[idx];
+			var mesh = bounds.Mesh;
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			var transform = mesh.GlobalTransform;
+			Vector3 worldCenter = transform * bounds.LocalCenter;
+			float worldScale = GetTransformMaxScale(transform);
+			float margin = mesh.Visible ? hideMargin : showMargin;
+			float worldRadius = bounds.LocalRadius * worldScale + margin;
+			bool visible = IsSphereInFrustum(frustumPlanes, frustumPlaneSigns, worldCenter, worldRadius);
+			if (mesh.Visible != visible)
+				mesh.Visible = visible;
+		}
+
+		_objectCullingCursor = (_objectCullingCursor + batch) % total;
+	}
+
+	private void ProcessDistanceObjectCullingBatch(Vector3 cameraPosition, float maxDistanceSq, float showDistanceSq)
+	{
+		int total = _distanceCulledObjectInstances.Count;
+		if (total <= 0)
+			return;
+
+		int batch = ResolveCullingBatchSize(total, ObjectCullingBatchSize);
+		if (_objectCullingCursor >= total)
+			_objectCullingCursor = 0;
+
+		for (int n = 0; n < batch; n++)
+		{
+			int idx = (_objectCullingCursor + n) % total;
+			var mesh = _distanceCulledObjectInstances[idx];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
@@ -648,21 +1524,50 @@ public partial class Main : Node3D
 				mesh.Visible = visible;
 		}
 
-		for (int i = 0; i < _distanceCulledAnimationControllers.Count; i++)
+		_objectCullingCursor = (_objectCullingCursor + batch) % total;
+	}
+
+	private void ProcessAnimationCullingBatch(Vector3 cameraPosition, float maxDistanceSq, bool useFrustum)
+	{
+		int total = _distanceCulledAnimationControllers.Count;
+		if (total <= 0)
+			return;
+
+		int batch = ResolveCullingBatchSize(total, AnimationCullingBatchSize);
+		if (_animationCullingCursor >= total)
+			_animationCullingCursor = 0;
+
+		for (int n = 0; n < batch; n++)
 		{
-			var controller = _distanceCulledAnimationControllers[i];
+			int idx = (_animationCullingCursor + n) % total;
+			var controller = _distanceCulledAnimationControllers[idx];
 			if (controller == null || !GodotObject.IsInstanceValid(controller))
 				continue;
 
-			bool animate = controller.HasAnyVisibleTargetWithinDistance(cameraPosition, maxDistanceSq);
+			bool animate = useFrustum
+				? controller.HasAnyVisibleTarget()
+				: controller.HasAnyVisibleTargetWithinDistance(cameraPosition, maxDistanceSq);
 			controller.SetExternalAnimationEnabled(animate);
 		}
+
+		_animationCullingCursor = (_animationCullingCursor + batch) % total;
+	}
+
+	private static int ResolveCullingBatchSize(int totalCount, int requestedBatchSize)
+	{
+		if (totalCount <= 0)
+			return 0;
+
+		return Math.Clamp(requestedBatchSize, 1, totalCount);
 	}
 
 	private void RebuildObjectDistanceCullingCaches()
 	{
 		_distanceCulledObjectInstances.Clear();
+		_distanceCulledObjectBounds.Clear();
 		_distanceCulledAnimationControllers.Clear();
+		_objectCullingCursor = 0;
+		_animationCullingCursor = 0;
 
 		if (_objectsRoot == null || !GodotObject.IsInstanceValid(_objectsRoot))
 			return;
@@ -673,12 +1578,72 @@ public partial class Main : Node3D
 				mesh.Name.ToString().StartsWith("Obj_", StringComparison.Ordinal))
 			{
 				_distanceCulledObjectInstances.Add(mesh);
+				_distanceCulledObjectBounds.Add(BuildObjectCullBounds(mesh));
 				continue;
 			}
 
 			if (child is MuAnimatedMeshController controller)
 				_distanceCulledAnimationControllers.Add(controller);
 		}
+	}
+
+	private static ObjectCullBounds BuildObjectCullBounds(MeshInstance3D mesh)
+	{
+		if (mesh.Mesh == null)
+			return new ObjectCullBounds(mesh, Vector3.Zero, 0.75f);
+
+		var aabb = mesh.Mesh.GetAabb();
+		Vector3 localCenter = aabb.Position + (aabb.Size * 0.5f);
+		float localRadius = MathF.Max(0.5f, aabb.Size.Length() * 0.5f);
+		return new ObjectCullBounds(mesh, localCenter, localRadius);
+	}
+
+	private static float GetTransformMaxScale(Transform3D transform)
+	{
+		float sx = transform.Basis.X.Length();
+		float sy = transform.Basis.Y.Length();
+		float sz = transform.Basis.Z.Length();
+		return MathF.Max(0.0001f, MathF.Max(sx, MathF.Max(sy, sz)));
+	}
+
+	private static Vector3 GetFrustumInsideSamplePoint(Camera3D camera)
+	{
+		Vector3 forward = -camera.GlobalTransform.Basis.Z;
+		if (forward.LengthSquared() <= 0.000001f)
+			forward = Vector3.Forward;
+
+		forward = forward.Normalized();
+		float nearOffset = MathF.Max(0.05f, camera.Near) + 0.5f;
+		return camera.GlobalPosition + (forward * nearOffset);
+	}
+
+	private static float[] BuildFrustumPlaneSigns(Godot.Collections.Array<Plane> frustumPlanes, Vector3 insidePoint)
+	{
+		int count = frustumPlanes.Count;
+		var signs = new float[count];
+		for (int i = 0; i < count; i++)
+		{
+			float d = frustumPlanes[i].DistanceTo(insidePoint);
+			signs[i] = d >= 0f ? 1f : -1f;
+		}
+
+		return signs;
+	}
+
+	private static bool IsSphereInFrustum(
+		Godot.Collections.Array<Plane> frustumPlanes,
+		float[] planeSigns,
+		Vector3 center,
+		float radius)
+	{
+		for (int i = 0; i < frustumPlanes.Count; i++)
+		{
+			float signedDistance = frustumPlanes[i].DistanceTo(center) * planeSigns[i];
+			if (signedDistance < -radius)
+				return false;
+		}
+
+		return true;
 	}
 
 	private void ResetObjectDistanceCulling()
@@ -702,6 +1667,8 @@ public partial class Main : Node3D
 			controller.SetExternalAnimationEnabled(true);
 		}
 
+		_objectCullingCursor = 0;
+		_animationCullingCursor = 0;
 		_distanceCullingResetPending = false;
 	}
 
@@ -738,6 +1705,15 @@ public partial class Main : Node3D
 	{
 		_lorenciaLeafSystem?.Clear();
 		_lorenciaBirdSystem?.Clear();
+		LorenciaFireEmitter.ResetSharedAssetsForReload();
+		if (_charactersRoot != null && GodotObject.IsInstanceValid(_charactersRoot))
+			ClearChildren(_charactersRoot);
+		_darkWizardRoot = null;
+		_darkWizardMeshes.Clear();
+		_darkWizardIdleControllers.Clear();
+		_darkWizardWalkControllers.Clear();
+		_darkWizardPath.Clear();
+		_darkWizardHasTargetYaw = false;
 		StopWorldAudio();
 		base._ExitTree();
 	}

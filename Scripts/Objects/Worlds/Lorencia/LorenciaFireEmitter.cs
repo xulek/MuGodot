@@ -105,6 +105,14 @@ public sealed partial class LorenciaFireEmitter : Node3D
     private static readonly object AssetLock = new();
     private static Task<FlameAssets?>? _assetsTask;
 
+    public static void ResetSharedAssetsForReload()
+    {
+        lock (AssetLock)
+        {
+            _assetsTask = null;
+        }
+    }
+
     public static void AttachTo(MeshInstance3D instance, short sourceType, int variantIndex = 0, string? nodeName = null)
     {
         if (instance == null || !GodotObject.IsInstanceValid(instance))

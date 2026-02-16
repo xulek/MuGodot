@@ -26,40 +26,75 @@ public partial class MuAnimatedMeshController : Node
     private float _startTimeSeconds;
     private float _framePos;
     private bool _externalAnimationEnabled = true;
+    private bool _useRealtimeInterpolation;
+    private MuModelBuilder? _modelBuilder;
+    private BMD? _modelBmd;
+    private BMD? _animationSourceBmd;
+    private StandardMaterial3D[] _materials = [];
+    private int _actionIndex;
+    private ArrayMesh? _realtimeMesh;
 
     public void Initialize(
         MuModelBuilder modelBuilder,
         BMD bmd,
-        StandardMaterial3D[] materials,
+        StandardMaterial3D[]? materials,
         int actionIndex = 0,
         float animationSpeed = 4f,
         float startFrame = 0f,
-        int subFrameSamples = 0)
+        int subFrameSamples = 0,
+        BMD? animationSourceBmd = null,
+        float? syncStartTimeSeconds = null,
+        bool useRealtimeInterpolation = false)
     {
+        var animationTimelineBmd = animationSourceBmd ?? bmd;
+        _useRealtimeInterpolation = useRealtimeInterpolation;
+        _modelBuilder = modelBuilder;
+        _modelBmd = bmd;
+        _animationSourceBmd = animationSourceBmd;
+        _materials = materials ?? [];
+        _actionIndex = actionIndex;
         _animationSpeed = animationSpeed;
-        _actionPlaySpeed = modelBuilder.GetActionPlaySpeed(bmd, actionIndex);
-        _baseFrameCount = GetTotalFrames(bmd, actionIndex);
-        int vertexCostPerFrame = EstimateFrameVertexCost(bmd);
-        _samplesPerFrame = ResolveSamplesPerFrame(_baseFrameCount, vertexCostPerFrame, subFrameSamples);
-        _frameCount = Math.Max(1, _baseFrameCount * _samplesPerFrame);
-
-        _frames = new ArrayMesh[_frameCount];
-        for (int i = 0; i < _frameCount; i++)
+        _actionPlaySpeed = modelBuilder.GetActionPlaySpeed(animationTimelineBmd, actionIndex);
+        _baseFrameCount = GetTotalFrames(animationTimelineBmd, actionIndex);
+        if (_useRealtimeInterpolation)
         {
-            float sourceFramePos = (float)i / _samplesPerFrame;
-            var mesh = modelBuilder.BuildMesh(bmd, actionIndex: actionIndex, framePos: sourceFramePos);
-            if (mesh == null)
-                continue;
+            _samplesPerFrame = 1;
+            _frameCount = Math.Max(1, _baseFrameCount);
+            _frames = [];
+        }
+        else
+        {
+            int vertexCostPerFrame = EstimateFrameVertexCost(bmd);
+            _samplesPerFrame = ResolveSamplesPerFrame(_baseFrameCount, vertexCostPerFrame, subFrameSamples);
+            _frameCount = Math.Max(1, _baseFrameCount * _samplesPerFrame);
 
-            ApplyMaterials(mesh, materials);
-            _frames[i] = mesh;
+            _frames = new ArrayMesh[_frameCount];
+            for (int i = 0; i < _frameCount; i++)
+            {
+                float sourceFramePos = (float)i / _samplesPerFrame;
+                var mesh = modelBuilder.BuildMesh(
+                    bmd,
+                    actionIndex: actionIndex,
+                    framePos: sourceFramePos,
+                    animationSourceBmd: animationSourceBmd);
+                if (mesh == null)
+                    continue;
+
+                ApplyMaterials(mesh, _materials);
+                _frames[i] = mesh;
+            }
         }
 
-        _startFrame = WrapFrame(startFrame, _frameCount);
-        _startTimeSeconds = Time.GetTicksMsec() * 0.001f;
+        _startFrame = WrapFrame(startFrame, _baseFrameCount);
+        _startTimeSeconds = syncStartTimeSeconds ?? (Time.GetTicksMsec() * 0.001f);
         _framePos = _startFrame;
         _currentFrame = (int)_framePos;
-        if (_frames[Math.Clamp(_currentFrame, 0, _frames.Length - 1)] == null)
+
+        if (_useRealtimeInterpolation)
+        {
+            UpdateRealtimeMesh(_framePos);
+        }
+        else if (_frames[Math.Clamp(_currentFrame, 0, _frames.Length - 1)] == null)
         {
             for (int i = 0; i < _frames.Length; i++)
             {
@@ -71,6 +106,7 @@ public partial class MuAnimatedMeshController : Node
                 break;
             }
         }
+
         RefreshProcessState();
     }
 
@@ -85,6 +121,9 @@ public partial class MuAnimatedMeshController : Node
 
     public Mesh? GetCurrentMesh()
     {
+        if (_useRealtimeInterpolation)
+            return _realtimeMesh;
+
         if (_frames.Length == 0)
             return null;
         var mesh = _frames[Math.Clamp(_currentFrame, 0, _frames.Length - 1)];
@@ -125,17 +164,45 @@ public partial class MuAnimatedMeshController : Node
         return false;
     }
 
+    public bool HasAnyVisibleTarget()
+    {
+        if (_targets.Count == 0)
+            return false;
+
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            var target = _targets[i];
+            if (target == null || !IsInstanceValid(target))
+                continue;
+
+            if (target.Visible)
+                return true;
+        }
+
+        return false;
+    }
+
     public override void _Process(double delta)
     {
-        if (_frameCount <= 1 || _frames.Length == 0)
+        if (_baseFrameCount <= 1)
             return;
 
         // Use absolute time to reduce jitter from variable frame delta.
         float nowSeconds = Time.GetTicksMsec() * 0.001f;
         float elapsed = nowSeconds - _startTimeSeconds;
-        float frameAdvance = elapsed * _actionPlaySpeed * _animationSpeed * _samplesPerFrame;
-        _framePos = WrapFrame(_startFrame + frameAdvance, _frameCount);
-        int newFrame = (int)_framePos;
+        float frameAdvance = elapsed * _actionPlaySpeed * _animationSpeed;
+        _framePos = WrapFrame(_startFrame + frameAdvance, _baseFrameCount);
+
+        if (_useRealtimeInterpolation)
+        {
+            UpdateRealtimeMesh(_framePos);
+            return;
+        }
+
+        if (_frames.Length == 0)
+            return;
+
+        int newFrame = (int)(_framePos * _samplesPerFrame);
         if (newFrame == _currentFrame)
             return;
 
@@ -154,9 +221,38 @@ public partial class MuAnimatedMeshController : Node
         }
     }
 
+    private void UpdateRealtimeMesh(float framePos)
+    {
+        if (_modelBuilder == null || _modelBmd == null)
+            return;
+
+        var mesh = _modelBuilder.BuildMesh(
+            _modelBmd,
+            actionIndex: _actionIndex,
+            framePos: framePos,
+            targetMesh: _realtimeMesh,
+            animationSourceBmd: _animationSourceBmd);
+        if (mesh == null)
+            return;
+
+        _realtimeMesh = mesh;
+        ApplyMaterials(_realtimeMesh, _materials);
+
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            var target = _targets[i];
+            if (target == null || !IsInstanceValid(target))
+                continue;
+
+            if (target.Mesh != _realtimeMesh)
+                target.Mesh = _realtimeMesh;
+        }
+    }
+
     private void RefreshProcessState()
     {
-        SetProcess(_frameCount > 1 && _externalAnimationEnabled);
+        int timelineFrames = _useRealtimeInterpolation ? _baseFrameCount : _frameCount;
+        SetProcess(timelineFrames > 1 && _externalAnimationEnabled);
     }
 
     private static int GetTotalFrames(BMD bmd, int actionIndex)
