@@ -61,6 +61,7 @@ public partial class Main : Node3D
 	private MuObjectLoader _objectLoader = null!;
 	private MuGrassRenderer? _grassRenderer;
 	private LorenciaAmbientManager? _ambientManager;
+	private LorenciaHouseOcclusionSystem? _houseOcclusionSystem;
 	private CameraController _cameraController = null!;
 	private ObjectCullingSystem _cullingSystem = null!;
 	private WorldAudioManager? _audioManager;
@@ -112,6 +113,10 @@ public partial class Main : Node3D
 			?? new LorenciaAmbientManager { Name = "LorenciaAmbientManager" };
 		if (_ambientManager.GetParent() == null) AddChild(_ambientManager);
 		_ambientManager.Initialize(_modelBuilder, _terrainBuilder);
+		_houseOcclusionSystem = GetNodeOrNull<LorenciaHouseOcclusionSystem>("LorenciaHouseOcclusionSystem")
+			?? new LorenciaHouseOcclusionSystem { Name = "LorenciaHouseOcclusionSystem" };
+		if (_houseOcclusionSystem.GetParent() == null) AddChild(_houseOcclusionSystem);
+		_houseOcclusionSystem.Initialize(GetCameraTargetPosition);
 
 		_audioManager = GetNodeOrNull<WorldAudioManager>("WorldAudioManager")
 			?? new WorldAudioManager { Name = "WorldAudioManager" };
@@ -228,12 +233,14 @@ public partial class Main : Node3D
 					enableAnimations: enableObjectAnimations,
 					assignEditorOwnership: assignOwnership);
 				_cullingSystem.RebuildCaches(_objectsRoot);
+				_houseOcclusionSystem?.RebuildCaches(_objectsRoot, WorldIndex);
 				if (FullObjectOwnershipPassInEditor)
 					ExposeGeneratedNodesInEditor(_objectsRoot);
 			}
 			else
 			{
 				_cullingSystem.RebuildCaches(_objectsRoot);
+				_houseOcclusionSystem?.RebuildCaches(_objectsRoot, WorldIndex);
 			}
 
 			if (_ambientManager != null)
@@ -383,6 +390,7 @@ public partial class Main : Node3D
 		SetOwnerIfNeeded(_charactersRoot, editedSceneRoot);
 		SetOwnerIfNeeded(_audioManager, editedSceneRoot);
 		SetOwnerIfNeeded(_ambientManager, editedSceneRoot);
+		SetOwnerIfNeeded(_houseOcclusionSystem, editedSceneRoot);
 	}
 
 	private static void SetOwnerIfNeeded(Node? node, Node owner)
@@ -435,6 +443,8 @@ public partial class Main : Node3D
 			_darkWizardController.Update(delta);
 			_cameraController.Update(delta);
 		}
+
+		_houseOcclusionSystem?.UpdateOcclusion(delta, WorldIndex, enabledInCurrentMode: !isEditor);
 
 		Vector3 cameraPosition = _cameraController.GetEditorAwarePosition();
 		_cullingSystem.Update(delta, cameraPosition);
@@ -492,6 +502,7 @@ public partial class Main : Node3D
 	public override void _ExitTree()
 	{
 		_ambientManager?.Clear();
+		_houseOcclusionSystem?.ResetToOpaque();
 		LorenciaFireEmitter.ResetSharedAssetsForReload();
 		if (_charactersRoot != null && GodotObject.IsInstanceValid(_charactersRoot))
 			ClearChildren(_charactersRoot);

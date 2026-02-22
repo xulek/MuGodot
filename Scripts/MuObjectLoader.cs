@@ -168,6 +168,9 @@ public class MuObjectLoader
                 if (assignEditorOwnership && Engine.IsEditorHint() && parent.Owner != null)
                     instance.Owner = parent.Owner;
 
+                instance.SetMeta("mu_type", type);
+                instance.SetMeta("mu_world", worldIndex);
+
                 worldRules.ApplyInstanceRules(type, instance);
 
                 animationController?.RegisterInstance(instance);
