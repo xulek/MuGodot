@@ -266,5 +266,20 @@ public sealed class LorenciaWorldObjectRules : IWorldObjectRules
             LorenciaFireEmitter.AttachTo(instance, type, variantIndex: 0, nodeName: "LorenciaBridgeFireA");
             LorenciaFireEmitter.AttachTo(instance, type, variantIndex: 1, nodeName: "LorenciaBridgeFireB");
         }
+
+        // Candle01: small flickering warm-yellow light above the flame mesh.
+        if (type == 150)
+            LorenciaPointLightEmitter.AttachTo(instance, type);
+
+        // StreetLight01: static warm-white lamp elevated above the lantern.
+        if (type == 90)
+            LorenciaPointLightEmitter.AttachTo(instance, type);
+
+        // DungeonGate01: two flickering fire-colored lights on the flanking pillars.
+        if (type == 55)
+        {
+            LorenciaPointLightEmitter.AttachTo(instance, type, variantIndex: 0, nodeName: "LorenciaDungeonGateLightA");
+            LorenciaPointLightEmitter.AttachTo(instance, type, variantIndex: 1, nodeName: "LorenciaDungeonGateLightB");
+        }
     }
 }
