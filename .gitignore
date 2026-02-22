@@ -345,3 +345,4 @@ mono_crash.*.json
 **/BenchmarkDotNet.Artifacts/
 **/artifacts/
 monogame/
+*.uid
