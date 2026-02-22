@@ -1823,8 +1823,9 @@ public partial class Main : Node3D
 		if (_musicPlayer == null || _terrainBuilder == null || _camera == null)
 			return;
 
-		int tileX = Math.Clamp((int)MathF.Floor(_camera.Position.X), 0, MuConfig.TerrainSize - 1);
-		int tileY = Math.Clamp((int)MathF.Floor(-_camera.Position.Z), 0, MuConfig.TerrainSize - 1);
+		Vector3 playerPos = GetCameraTargetPosition();
+		int tileX = Math.Clamp((int)MathF.Floor(playerPos.X), 0, MuConfig.TerrainSize - 1);
+		int tileY = Math.Clamp((int)MathF.Floor(-playerPos.Z), 0, MuConfig.TerrainSize - 1);
 		bool isInPubArea = _terrainBuilder.GetLayer1TextureIndexAt(tileX, tileY) == 4;
 
 		if (isInPubArea == _isInLorenciaPubArea)
