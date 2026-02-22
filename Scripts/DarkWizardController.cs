@@ -2,12 +2,20 @@ using Godot;
 using Client.Data.ATT;
 using Client.Data.BMD;
 using Client.Data.CAP;
+using MuGodot.Audio;
 
 namespace MuGodot;
 
 [Tool]
 public partial class DarkWizardController : Node3D
 {
+	private enum SpecialPoseMode
+	{
+		None,
+		Sit,
+		Rest
+	}
+
 	private const float MonoGameMoveSpeed = 300f * MuConfig.WorldToGodot;
 	private const int IdleAction = 1;
 	private const int WalkAction = 15;
@@ -30,23 +38,50 @@ public partial class DarkWizardController : Node3D
 	[Export] public float DarkWizardAnimationSpeed { get; set; } = 6.25f;
 	[Export] public int DarkWizardSubFrameSamples { get; set; } = 8;
 	[Export] public bool DarkWizardRealtimeInterpolation { get; set; } = true;
+	[Export] public int DarkWizardSitActionIndex { get; set; } = 233;
+	[Export] public int DarkWizardRestActionIndex { get; set; } = 239;
+	[ExportGroup("DarkWizard Audio")]
+	[Export] public string SitSoundPath { get; set; } = "Sound/pDropItem.wav";
+	[Export] public string RestSoundPath { get; set; } = "Sound/pDropItem.wav";
+	[Export] public float FootstepVolumeDb { get; set; } = -4f;
+	[Export] public float PoseVolumeDb { get; set; } = -2f;
 
 	private MuModelBuilder _modelBuilder = null!;
 	private MuTerrainBuilder _terrainBuilder = null!;
 	private Camera3D? _camera;
 	private string _dataPath = "";
 	private Action? _onCameraReset;
+	private int _worldIndex;
 
 	private Node3D? _root;
+	private Node3D? _moveTargetMarker;
+	private MeshInstance3D? _moveTargetMesh;
+	private MuAnimatedMeshController? _moveTargetAnimController;
+	private StandardMaterial3D[] _moveTargetMaterials = Array.Empty<StandardMaterial3D>();
+	private Color[] _moveTargetBaseAlbedo = Array.Empty<Color>();
+	private float _moveTargetVisibleMs;
+	private const float MoveTargetDurationMs = 1500f;
 	private readonly List<MeshInstance3D> _meshes = new();
 	private readonly List<MuAnimatedMeshController> _idleControllers = new();
 	private readonly List<MuAnimatedMeshController> _walkControllers = new();
+	private readonly List<MuAnimatedMeshController> _sitControllers = new();
+	private readonly List<MuAnimatedMeshController> _restControllers = new();
 	private bool _moving;
+	private SpecialPoseMode _specialPose = SpecialPoseMode.None;
 	private Vector3 _moveTarget;
 	private readonly Queue<Vector2I> _path = new();
 	private float _targetYaw;
 	private bool _hasTargetYaw;
 	private Vector3 _fallbackPosition = new Vector3(128f, 0f, -128f);
+	private AudioStreamPlayer3D? _footstepPlayer;
+	private AudioStreamPlayer3D? _posePlayer;
+	private AudioStream? _walkGrassSound;
+	private AudioStream? _walkSnowSound;
+	private AudioStream? _walkSoilSound;
+	private AudioStream? _swimSound;
+	private AudioStream? _sitSound;
+	private AudioStream? _restSound;
+	private float _footstepTimer;
 
 	public void Initialize(MuModelBuilder modelBuilder, MuTerrainBuilder terrainBuilder, Camera3D? camera, string dataPath, Action onCameraReset)
 	{
@@ -69,6 +104,60 @@ public partial class DarkWizardController : Node3D
 		TrySetMoveTarget(mousePosition);
 	}
 
+	public bool TryMoveToTile(Vector2I tile, bool showMarker = true)
+	{
+		return TrySetMoveTargetTile(tile.X, tile.Y, showMarker);
+	}
+
+	public bool IsMoving()
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return false;
+
+		Vector2 remaining = new Vector2(_moveTarget.X - _root.Position.X, _moveTarget.Z - _root.Position.Z);
+		return _path.Count > 0 || remaining.LengthSquared() > 0.0001f;
+	}
+
+	public Vector2I GetCurrentTile()
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return new Vector2I(0, 0);
+
+		return new Vector2I(
+			Math.Clamp((int)MathF.Floor(_root.Position.X), 0, MuConfig.TerrainSize - 1),
+			Math.Clamp((int)MathF.Floor(-_root.Position.Z), 0, MuConfig.TerrainSize - 1));
+	}
+
+	public bool IsNearTile(Vector2I tile, float maxDistance = 0.15f)
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return false;
+
+		float targetX = Mathf.Clamp(tile.X + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float targetY = Mathf.Clamp(tile.Y + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		Vector2 delta = new Vector2(_root.Position.X - targetX, _root.Position.Z - (-targetY));
+		return delta.Length() <= MathF.Max(0.01f, maxDistance);
+	}
+
+	public void EnterSitPose(float facingYaw)
+	{
+		EnterSpecialPose(SpecialPoseMode.Sit, facingYaw);
+	}
+
+	public void EnterRestPose(float facingYaw)
+	{
+		EnterSpecialPose(SpecialPoseMode.Rest, facingYaw);
+	}
+
+	public void ClearSpecialPose()
+	{
+		if (_specialPose == SpecialPoseMode.None)
+			return;
+
+		_specialPose = SpecialPoseMode.None;
+		SetAnimationState(_moving, force: true);
+	}
+
 	public void Update(double delta)
 	{
 		UpdateMovement(delta);
@@ -77,12 +166,24 @@ public partial class DarkWizardController : Node3D
 	public void Reset()
 	{
 		_root = null;
+		_moveTargetMarker = null;
+		_moveTargetMesh = null;
+		_moveTargetAnimController = null;
+		_moveTargetMaterials = Array.Empty<StandardMaterial3D>();
+		_moveTargetBaseAlbedo = Array.Empty<Color>();
+		_moveTargetVisibleMs = 0f;
 		_meshes.Clear();
 		_idleControllers.Clear();
 		_walkControllers.Clear();
+		_sitControllers.Clear();
+		_restControllers.Clear();
 		_moving = false;
+		_specialPose = SpecialPoseMode.None;
 		_path.Clear();
 		_hasTargetYaw = false;
+		_footstepPlayer = null;
+		_posePlayer = null;
+		_footstepTimer = 0f;
 	}
 
 	public async Task SpawnAsync(Node3D charactersRoot, int worldIndex, Action<string>? onStatus = null)
@@ -94,11 +195,13 @@ public partial class DarkWizardController : Node3D
 		Reset();
 
 		var spawn = await ResolveSpawnPositionAsync(worldIndex);
+		_worldIndex = worldIndex;
 		_fallbackPosition = spawn;
 
 		var root = new Node3D { Name = "DarkWizard" };
 		charactersRoot.AddChild(root);
 		_root = root;
+		EnsureAudioPlayers();
 
 		BMD? skeletonBmd = await _modelBuilder.LoadBmdAsync(DarkWizardModelPath);
 		if (skeletonBmd == null)
@@ -113,6 +216,7 @@ public partial class DarkWizardController : Node3D
 			_path.Clear();
 			_targetYaw = _root.Rotation.Y;
 			_hasTargetYaw = true;
+			await EnsureMoveTargetMarkerAsync();
 			_onCameraReset?.Invoke();
 			onStatus?.Invoke("DarkWizard model missing (using fallback).");
 			return;
@@ -171,6 +275,36 @@ public partial class DarkWizardController : Node3D
 				}
 			}
 
+			TryCreateOptionalPoseController(
+				root,
+				partBmd,
+				materials,
+				skeletonBmd,
+				subFrameSamples,
+				animationSyncStartSeconds,
+				prefix,
+				DarkWizardSitActionIndex,
+				idleAction,
+				walkAction,
+				"_Sit",
+				_sitControllers,
+				meshInstance);
+
+			TryCreateOptionalPoseController(
+				root,
+				partBmd,
+				materials,
+				skeletonBmd,
+				subFrameSamples,
+				animationSyncStartSeconds,
+				prefix,
+				DarkWizardRestActionIndex,
+				idleAction,
+				walkAction,
+				"_Rest",
+				_restControllers,
+				meshInstance);
+
 			hasRenderablePart = true;
 		}
 
@@ -186,6 +320,7 @@ public partial class DarkWizardController : Node3D
 			_path.Clear();
 			_targetYaw = _root.Rotation.Y;
 			_hasTargetYaw = true;
+			await EnsureMoveTargetMarkerAsync();
 			_onCameraReset?.Invoke();
 			onStatus?.Invoke("DarkWizard class models missing (using fallback).");
 			return;
@@ -197,6 +332,7 @@ public partial class DarkWizardController : Node3D
 		_targetYaw = _root.Rotation.Y;
 		_hasTargetYaw = true;
 		SetAnimationState(isMoving: false, force: true);
+		await EnsureMoveTargetMarkerAsync();
 		_onCameraReset?.Invoke();
 		GD.Print($"[DarkWizard] Spawned at {spawn}. Parts: {_meshes.Count}, walk controllers: {_walkControllers.Count}");
 	}
@@ -229,6 +365,46 @@ public partial class DarkWizardController : Node3D
 			useRealtimeInterpolation: DarkWizardRealtimeInterpolation);
 		controller.SetExternalAnimationEnabled(false);
 		return controller;
+	}
+
+	private void TryCreateOptionalPoseController(
+		Node3D root,
+		BMD partBmd,
+		StandardMaterial3D[] materials,
+		BMD skeletonBmd,
+		int subFrameSamples,
+		float animationSyncStartSeconds,
+		string prefix,
+		int requestedActionIndex,
+		int idleAction,
+		int walkAction,
+		string suffix,
+		List<MuAnimatedMeshController> targetList,
+		MeshInstance3D meshInstance)
+	{
+		if (requestedActionIndex < 0 || skeletonBmd.Actions == null || skeletonBmd.Actions.Length == 0)
+			return;
+
+		int maxAction = skeletonBmd.Actions.Length - 1;
+		if (requestedActionIndex > maxAction)
+			return;
+
+		int actionIndex = ClampActionIndex(skeletonBmd, requestedActionIndex);
+		if (actionIndex == idleAction || actionIndex == walkAction)
+			return;
+
+		var controller = CreateAnimationController(
+			root, partBmd, materials, actionIndex,
+			$"{prefix}{suffix}", skeletonBmd, subFrameSamples, animationSyncStartSeconds);
+		var mesh = controller.GetCurrentMesh();
+		if (mesh == null)
+		{
+			controller.QueueFree();
+			return;
+		}
+
+		controller.RegisterInstance(meshInstance);
+		targetList.Add(controller);
 	}
 
 	private static string BuildPartModelPath(string prefix, int classId)
@@ -301,8 +477,18 @@ public partial class DarkWizardController : Node3D
 
 		int tileX = Math.Clamp((int)MathF.Floor(hitPos.X), 0, MuConfig.TerrainSize - 1);
 		int tileY = Math.Clamp((int)MathF.Floor(-hitPos.Z), 0, MuConfig.TerrainSize - 1);
+		TrySetMoveTargetTile(tileX, tileY, showMarker: true);
+	}
+
+	private bool TrySetMoveTargetTile(int tileX, int tileY, bool showMarker)
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return false;
+
+		tileX = Math.Clamp(tileX, 0, MuConfig.TerrainSize - 1);
+		tileY = Math.Clamp(tileY, 0, MuConfig.TerrainSize - 1);
 		if (!IsTileWalkable(tileX, tileY))
-			return;
+			return false;
 
 		int startX = Math.Clamp((int)MathF.Floor(_root.Position.X), 0, MuConfig.TerrainSize - 1);
 		int startY = Math.Clamp((int)MathF.Floor(-_root.Position.Z), 0, MuConfig.TerrainSize - 1);
@@ -311,14 +497,28 @@ public partial class DarkWizardController : Node3D
 
 		var path = FindPath(startTile, targetTile);
 		if (path.Count == 0)
-			return;
+			return false;
 
+		ClearSpecialPose();
 		_path.Clear();
 		for (int i = 0; i < path.Count; i++)
 			_path.Enqueue(path[i]);
 
+		if (showMarker)
+		{
+			float markerX = Mathf.Clamp(tileX + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+			float markerY = Mathf.Clamp(tileY + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+			float markerHeight = _terrainBuilder.GetHeightInterpolated(markerX, markerY) + DarkWizardHeightOffset;
+			ShowMoveTargetMarker(new Vector3(markerX, markerHeight, -markerY));
+		}
+
 		if (!AdvancePath(_root.Position))
+		{
 			SetAnimationState(isMoving: false, force: true);
+			return false;
+		}
+
+		return true;
 	}
 
 	private bool TryRaycastTerrain(Vector2 mousePosition, out Vector3 hitPosition)
@@ -451,6 +651,7 @@ public partial class DarkWizardController : Node3D
 
 		_root.Position = current;
 		ApplyFacingInterpolation(delta);
+		UpdateMoveTargetMarker(delta);
 
 		Vector2 remaining = new Vector2(
 			_moveTarget.X - current.X,
@@ -458,6 +659,9 @@ public partial class DarkWizardController : Node3D
 		float remainingDistance = remaining.Length();
 		bool isMoving = float.IsFinite(remainingDistance) &&
 			(remainingDistance > moveEpsilon || _path.Count > 0);
+		UpdateFootstepAudio((float)delta, current, isMoving);
+		if (isMoving && _specialPose != SpecialPoseMode.None)
+			_specialPose = SpecialPoseMode.None;
 		SetAnimationState(isMoving);
 	}
 
@@ -506,6 +710,149 @@ public partial class DarkWizardController : Node3D
 
 		_targetYaw = MathF.Atan2(moveDir.X, moveDir.Y) + Mathf.DegToRad(DarkWizardFacingOffsetDegrees);
 		_hasTargetYaw = true;
+	}
+
+	private void EnterSpecialPose(SpecialPoseMode pose, float facingYaw)
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return;
+
+		_specialPose = pose;
+		_path.Clear();
+		_moveTarget = _root.Position;
+		_targetYaw = facingYaw;
+		_hasTargetYaw = true;
+		_moving = false;
+		SetAnimationState(isMoving: false, force: true);
+		PlayPoseSound(pose);
+	}
+
+	private void EnsureAudioPlayers()
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+			return;
+
+		_footstepPlayer = _root.GetNodeOrNull<AudioStreamPlayer3D>("FootstepAudio");
+		if (_footstepPlayer == null || !GodotObject.IsInstanceValid(_footstepPlayer))
+		{
+			_footstepPlayer = new AudioStreamPlayer3D
+			{
+				Name = "FootstepAudio",
+				UnitSize = 8f,
+				MaxDistance = 80f,
+				AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance
+			};
+			_root.AddChild(_footstepPlayer);
+		}
+		_footstepPlayer.VolumeDb = FootstepVolumeDb;
+
+		_posePlayer = _root.GetNodeOrNull<AudioStreamPlayer3D>("PoseAudio");
+		if (_posePlayer == null || !GodotObject.IsInstanceValid(_posePlayer))
+		{
+			_posePlayer = new AudioStreamPlayer3D
+			{
+				Name = "PoseAudio",
+				UnitSize = 8f,
+				MaxDistance = 80f,
+				AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance
+			};
+			_root.AddChild(_posePlayer);
+		}
+		_posePlayer.VolumeDb = PoseVolumeDb;
+
+		_walkGrassSound ??= LoadAudioAsset("Sound/pWalk(Grass).wav");
+		_walkSnowSound ??= LoadAudioAsset("Sound/pWalk(Snow).wav");
+		_walkSoilSound ??= LoadAudioAsset("Sound/pWalk(Soil).wav");
+		_swimSound ??= LoadAudioAsset("Sound/pSwim.wav");
+		_sitSound ??= LoadAudioAsset(SitSoundPath);
+		_restSound ??= LoadAudioAsset(RestSoundPath);
+	}
+
+	private void UpdateFootstepAudio(float delta, Vector3 current, bool isMoving)
+	{
+		if (_footstepPlayer == null || !GodotObject.IsInstanceValid(_footstepPlayer))
+			return;
+
+		if (!isMoving)
+		{
+			_footstepTimer = 0f;
+			return;
+		}
+
+		int tileX = Math.Clamp((int)MathF.Floor(current.X), 0, MuConfig.TerrainSize - 1);
+		int tileY = Math.Clamp((int)MathF.Floor(-current.Z), 0, MuConfig.TerrainSize - 1);
+		byte tex = _terrainBuilder.GetBaseTextureIndexAt(tileX, tileY);
+		bool isSwimming = tex == 5;
+
+		_footstepTimer += delta;
+		float interval = isSwimming ? 2.0f : 0.4f;
+		if (_footstepTimer < interval)
+			return;
+
+		_footstepTimer = 0f;
+		_footstepPlayer.Stream = ResolveFootstepStream(tex, isSwimming);
+		if (_footstepPlayer.Stream != null)
+			_footstepPlayer.Play();
+	}
+
+	private AudioStream? ResolveFootstepStream(byte terrainTexture, bool isSwimming)
+	{
+		if (isSwimming)
+			return _swimSound;
+
+		// Reference client uses special mapping in Devias.
+		if (_worldIndex == 2)
+		{
+			if (terrainTexture == 0 || terrainTexture == 1)
+				return _walkSnowSound;
+			if (terrainTexture == 4)
+				return _walkSoilSound;
+			return _walkSoilSound;
+		}
+
+		if (terrainTexture == 0 || terrainTexture == 1)
+			return _walkGrassSound;
+		if (terrainTexture == 4)
+			return _walkSnowSound;
+		return _walkSoilSound;
+	}
+
+	private void PlayPoseSound(SpecialPoseMode pose)
+	{
+		if (_posePlayer == null || !GodotObject.IsInstanceValid(_posePlayer))
+			return;
+
+		AudioStream? sound = pose switch
+		{
+			SpecialPoseMode.Sit => _sitSound,
+			SpecialPoseMode.Rest => _restSound,
+			_ => null
+		};
+		if (sound == null)
+			return;
+
+		_posePlayer.Stream = sound;
+		_posePlayer.Play();
+	}
+
+	private static AudioStream? LoadAudioAsset(string relativePath)
+	{
+		if (string.IsNullOrWhiteSpace(relativePath))
+			return null;
+
+		string normalized = relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar);
+		string inData = System.IO.Path.Combine(MuConfig.DataPath, normalized);
+		if (System.IO.File.Exists(inData))
+			return MuAudioLoader.LoadFromFile(inData);
+
+		var parent = System.IO.Directory.GetParent(MuConfig.DataPath);
+		if (parent == null)
+			return null;
+
+		string fallback = System.IO.Path.Combine(parent.FullName, "Data", normalized);
+		return System.IO.File.Exists(fallback)
+			? MuAudioLoader.LoadFromFile(fallback)
+			: null;
 	}
 
 	private void ApplyFacingInterpolation(double delta)
@@ -643,6 +990,9 @@ public partial class DarkWizardController : Node3D
 
 		_moving = isMoving;
 		bool hasWalkControllers = _walkControllers.Count > 0;
+		bool useSitPose = !isMoving && _specialPose == SpecialPoseMode.Sit && _sitControllers.Count > 0;
+		bool useRestPose = !isMoving && _specialPose == SpecialPoseMode.Rest && _restControllers.Count > 0;
+		bool useIdle = !useSitPose && !useRestPose;
 
 		for (int i = 0; i < _idleControllers.Count; i++)
 		{
@@ -650,7 +1000,7 @@ public partial class DarkWizardController : Node3D
 			if (controller == null || !GodotObject.IsInstanceValid(controller))
 				continue;
 
-			controller.SetExternalAnimationEnabled(!isMoving || !hasWalkControllers);
+			controller.SetExternalAnimationEnabled(useIdle && (!isMoving || !hasWalkControllers));
 		}
 
 		for (int i = 0; i < _walkControllers.Count; i++)
@@ -660,6 +1010,24 @@ public partial class DarkWizardController : Node3D
 				continue;
 
 			controller.SetExternalAnimationEnabled(isMoving);
+		}
+
+		for (int i = 0; i < _sitControllers.Count; i++)
+		{
+			var controller = _sitControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			controller.SetExternalAnimationEnabled(useSitPose);
+		}
+
+		for (int i = 0; i < _restControllers.Count; i++)
+		{
+			var controller = _restControllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			controller.SetExternalAnimationEnabled(useRestPose);
 		}
 	}
 
@@ -687,5 +1055,132 @@ public partial class DarkWizardController : Node3D
 	{
 		foreach (Node child in node.GetChildren())
 			child.QueueFree();
+	}
+
+	private async Task EnsureMoveTargetMarkerAsync()
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root) || _root.GetParent() == null)
+			return;
+
+		_moveTargetMarker = _root.GetParent().GetNodeOrNull<Node3D>("MoveTargetMarker");
+		if (_moveTargetMarker != null && GodotObject.IsInstanceValid(_moveTargetMarker))
+			return;
+
+		var marker = new Node3D
+		{
+			Name = "MoveTargetMarker",
+			Visible = false,
+			Scale = new Vector3(0.7f, 0.7f, 0.7f)
+		};
+		_root.GetParent().AddChild(marker);
+		_moveTargetMarker = marker;
+
+		const string moveTargetModelPath = "Effect/MoveTargetPosEffect.bmd";
+		var bmd = await _modelBuilder.LoadBmdAsync(moveTargetModelPath, logMissing: false);
+		if (bmd == null)
+		{
+			GD.PrintErr($"[DarkWizard] Move target effect missing: {moveTargetModelPath}");
+			return;
+		}
+
+		var materials = await _modelBuilder.LoadModelTexturesAsync(moveTargetModelPath);
+		if (materials.Length > 0)
+		{
+			_moveTargetBaseAlbedo = new Color[materials.Length];
+			for (int i = 0; i < materials.Length; i++)
+			{
+				var mat = materials[i];
+				if (mat == null)
+					continue;
+
+				mat.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+				mat.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+				_moveTargetBaseAlbedo[i] = mat.AlbedoColor;
+
+				// MonoGame MoveTargetPostEffectObject uses BlendMesh=0 and warm light tint.
+				if (i == 0)
+				{
+					mat.BlendMode = BaseMaterial3D.BlendModeEnum.Add;
+					mat.EmissionEnabled = true;
+					mat.Emission = new Color(1f, 0.7f, 0.3f);
+					mat.EmissionEnergyMultiplier = 1.0f;
+				}
+			}
+			_moveTargetMaterials = materials;
+		}
+
+		var mesh = new MeshInstance3D
+		{
+			Name = "MoveTargetMesh",
+			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off
+		};
+		marker.AddChild(mesh);
+		_moveTargetMesh = mesh;
+
+		var anim = new MuAnimatedMeshController
+		{
+			Name = "MoveTargetAnim"
+		};
+		marker.AddChild(anim);
+		_moveTargetAnimController = anim;
+		anim.Initialize(
+			_modelBuilder,
+			bmd,
+			materials,
+			actionIndex: 0,
+			animationSpeed: 4f,
+			subFrameSamples: 8,
+			useRealtimeInterpolation: true);
+		anim.RegisterInstance(mesh);
+		anim.SetExternalAnimationEnabled(true);
+	}
+
+	private void ShowMoveTargetMarker(Vector3 position)
+	{
+		if (_moveTargetMarker == null || !GodotObject.IsInstanceValid(_moveTargetMarker))
+			_ = EnsureMoveTargetMarkerAsync();
+		if (_moveTargetMarker == null || !GodotObject.IsInstanceValid(_moveTargetMarker))
+			return;
+
+		// Equivalent to MonoGame cursor offset (+50,+40,0) at MU scale.
+		_moveTargetMarker.Position = position + new Vector3(0.5f, 0.4f, 0f);
+		_moveTargetMarker.Visible = true;
+		_moveTargetVisibleMs = MoveTargetDurationMs;
+		ApplyMoveTargetAlpha(1f);
+	}
+
+	private void UpdateMoveTargetMarker(double delta)
+	{
+		if (_moveTargetMarker == null || !GodotObject.IsInstanceValid(_moveTargetMarker))
+			return;
+
+		if (_moveTargetVisibleMs <= 0f)
+		{
+			_moveTargetMarker.Visible = false;
+			return;
+		}
+
+		_moveTargetVisibleMs -= (float)(delta * 1000.0);
+		float life = Mathf.Clamp(_moveTargetVisibleMs / MoveTargetDurationMs, 0f, 1f);
+		ApplyMoveTargetAlpha(life);
+		_moveTargetMarker.Visible = life > 0f;
+	}
+
+	private void ApplyMoveTargetAlpha(float alpha)
+	{
+		alpha = Mathf.Clamp(alpha, 0f, 1f);
+		if (_moveTargetMaterials.Length == 0)
+			return;
+
+		int count = Math.Min(_moveTargetMaterials.Length, _moveTargetBaseAlbedo.Length);
+		for (int i = 0; i < count; i++)
+		{
+			var mat = _moveTargetMaterials[i];
+			if (mat == null)
+				continue;
+
+			var baseColor = _moveTargetBaseAlbedo[i];
+			mat.AlbedoColor = new Color(baseColor.R, baseColor.G, baseColor.B, alpha);
+		}
 	}
 }

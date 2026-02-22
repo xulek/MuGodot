@@ -16,6 +16,8 @@ public partial class LorenciaHouseOcclusionSystem : Node3D
 	private readonly List<MeshInstance3D> _pubRoofs = new();
 	private readonly Dictionary<MeshInstance3D, float> _alphaByMesh = new();
 	private readonly Dictionary<MeshInstance3D, GeometryInstance3D.ShadowCastingSetting> _originalShadowCastingByMesh = new();
+	private readonly List<FlickerEntry> _wall02Flickers = new();
+	private readonly Random _random = new();
 	private Func<Vector3>? _getPlayerPosition;
 	private bool _resetToOpaquePending;
 
@@ -30,6 +32,7 @@ public partial class LorenciaHouseOcclusionSystem : Node3D
 		_pubRoofs.Clear();
 		_alphaByMesh.Clear();
 		_originalShadowCastingByMesh.Clear();
+		_wall02Flickers.Clear();
 		_resetToOpaquePending = true;
 
 		if (!GodotObject.IsInstanceValid(objectsRoot) || worldIndex != 1)
@@ -55,12 +58,25 @@ public partial class LorenciaHouseOcclusionSystem : Node3D
 				_alphaByMesh[mesh] = 1f;
 				_originalShadowCastingByMesh[mesh] = mesh.CastShadow;
 			}
+
+			if (type == 122 && TryPrepareWall02Flicker(mesh, out var flicker))
+				_wall02Flickers.Add(flicker);
 		}
 	}
 
 	public void UpdateOcclusion(double delta, int worldIndex, bool enabledInCurrentMode)
 	{
-		if (!EnableHouseOcclusion || !enabledInCurrentMode || worldIndex != 1 || _getPlayerPosition == null)
+		if (!enabledInCurrentMode || worldIndex != 1)
+		{
+			if (_resetToOpaquePending)
+				ResetToOpaque();
+			ResetFlicker();
+			return;
+		}
+
+		UpdateWall02Flicker(delta);
+
+		if (!EnableHouseOcclusion || _getPlayerPosition == null)
 		{
 			if (_resetToOpaquePending)
 				ResetToOpaque();
@@ -119,6 +135,55 @@ public partial class LorenciaHouseOcclusionSystem : Node3D
 			_alphaByMesh[keys[i]] = 1f;
 
 		_resetToOpaquePending = false;
+	}
+
+	private void UpdateWall02Flicker(double delta)
+	{
+		float dt = MathF.Max(0f, (float)delta);
+		for (int i = 0; i < _wall02Flickers.Count; i++)
+		{
+			var entry = _wall02Flickers[i];
+			if (entry.Mesh == null || !GodotObject.IsInstanceValid(entry.Mesh) ||
+				entry.Material == null || !GodotObject.IsInstanceValid(entry.Material))
+				continue;
+
+			entry.Elapsed += dt;
+			if (entry.Elapsed >= entry.Duration)
+			{
+				entry.Start = entry.Target;
+				entry.Target = 0.85f + ((float)_random.NextDouble() * 0.15f);
+				entry.Duration = 0.10f + ((float)_random.NextDouble() * 0.10f);
+				entry.Elapsed = 0f;
+			}
+
+			float t = entry.Duration <= 0.0001f ? 1f : Mathf.Clamp(entry.Elapsed / entry.Duration, 0f, 1f);
+			float smooth = t * t * (3f - (2f * t));
+			float flickerAlpha = Mathf.Lerp(entry.Start, entry.Target, smooth);
+			entry.Material.AlbedoColor = new Color(
+				entry.BaseColor.R,
+				entry.BaseColor.G,
+				entry.BaseColor.B,
+				Mathf.Clamp(entry.BaseColor.A * flickerAlpha, 0f, 1f));
+
+			_wall02Flickers[i] = entry;
+		}
+	}
+
+	private void ResetFlicker()
+	{
+		for (int i = 0; i < _wall02Flickers.Count; i++)
+		{
+			var entry = _wall02Flickers[i];
+			if (entry.Material == null || !GodotObject.IsInstanceValid(entry.Material))
+				continue;
+
+			entry.Material.AlbedoColor = entry.BaseColor;
+			entry.Start = 1f;
+			entry.Target = 1f;
+			entry.Duration = 0.1f;
+			entry.Elapsed = 0f;
+			_wall02Flickers[i] = entry;
+		}
 	}
 
 	private void ApplyAlpha(MeshInstance3D mesh, float targetAlpha, float t)
@@ -186,5 +251,49 @@ public partial class LorenciaHouseOcclusionSystem : Node3D
 	{
 		if (_originalShadowCastingByMesh.TryGetValue(mesh, out var original))
 			mesh.CastShadow = original;
+	}
+
+	private bool TryPrepareWall02Flicker(MeshInstance3D mesh, out FlickerEntry flicker)
+	{
+		flicker = default;
+		const int meshIndex = 4;
+
+		Material? source = mesh.GetSurfaceOverrideMaterial(meshIndex);
+		if (source == null && mesh.Mesh != null && meshIndex < mesh.Mesh.GetSurfaceCount())
+			source = mesh.Mesh.SurfaceGetMaterial(meshIndex);
+		if (source is not StandardMaterial3D standardSource)
+			return false;
+
+		var duplicated = standardSource.Duplicate(true) as StandardMaterial3D;
+		if (duplicated == null)
+			return false;
+
+		duplicated.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+		duplicated.BlendMode = BaseMaterial3D.BlendModeEnum.Add;
+		duplicated.DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Disabled;
+		mesh.SetSurfaceOverrideMaterial(meshIndex, duplicated);
+
+		flicker = new FlickerEntry
+		{
+			Mesh = mesh,
+			Material = duplicated,
+			BaseColor = duplicated.AlbedoColor,
+			Start = 1f,
+			Target = 0.85f + ((float)_random.NextDouble() * 0.15f),
+			Duration = 0.10f + ((float)_random.NextDouble() * 0.10f),
+			Elapsed = 0f
+		};
+		return true;
+	}
+
+	private struct FlickerEntry
+	{
+		public MeshInstance3D Mesh;
+		public StandardMaterial3D Material;
+		public Color BaseColor;
+		public float Start;
+		public float Target;
+		public float Duration;
+		public float Elapsed;
 	}
 }

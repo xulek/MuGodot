@@ -138,6 +138,11 @@ public sealed class LorenciaWorldObjectRules : IWorldObjectRules
                     opaqueMeshes[opaqueCount++] = 1;
                 break;
 
+            // HouseWall02 => BlendMesh = 4, Additive (special flicker mesh in reference client)
+            case 122:
+                additiveMeshes[additiveCount++] = 4;
+                break;
+
             // Straw01 => force opaque blend/depth state
             case 102:
                 forceOpaqueForWholeObject = true;

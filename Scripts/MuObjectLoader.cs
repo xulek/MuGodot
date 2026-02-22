@@ -71,6 +71,19 @@ public class MuObjectLoader
             var modelCandidates = BuildModelPathCandidates(worldIndex, type, bmdFileName, availableBmdNames);
             if (modelCandidates.Count == 0)
             {
+                if (worldIndex == 1 && type == 133)
+                {
+                    foreach (var obj in objects)
+                    {
+                        var dummy = BuildInteractiveDummy(type, worldIndex, obj, placedCount);
+                        parent.AddChild(dummy);
+                        if (assignEditorOwnership && Engine.IsEditorHint() && parent.Owner != null)
+                            dummy.Owner = parent.Owner;
+                        placedCount++;
+                    }
+                    continue;
+                }
+
                 skippedTypes++;
                 continue;
             }
@@ -154,6 +167,7 @@ public class MuObjectLoader
                     pos.Z * MuConfig.WorldToGodot,
                     -pos.Y * MuConfig.WorldToGodot
                 );
+                instance.Position += new Vector3(0f, ComputeStableDepthOffset(type, pos, placedCount), 0f);
 
                 // Apply rotation: OBJ angles are in degrees, using intrinsic XYZ Euler order.
                 // Build quaternion in MU space then transform to Godot coordinates.
@@ -279,5 +293,43 @@ public class MuObjectLoader
 
         // Transform MU→Godot: Godot.X=MU.X, Godot.Y=MU.Z, Godot.Z=-MU.Y
         return new Quaternion(qx, qz, -qy, qw);
+    }
+
+    private static float ComputeStableDepthOffset(short type, System.Numerics.Vector3 muPos, int instanceOrdinal)
+    {
+        // Break ties for coplanar/overlapping geometry to reduce z-fighting flicker.
+        // Keep the lift small but stronger than before:
+        // max 0.00775 world units ~= 0.775 MU units.
+        int hx = BitConverter.SingleToInt32Bits(muPos.X);
+        int hy = BitConverter.SingleToInt32Bits(muPos.Y);
+        int hz = BitConverter.SingleToInt32Bits(muPos.Z);
+
+        int hash = HashCode.Combine(type, hx, hy, hz, instanceOrdinal);
+        int bucket = hash & 0x1F; // 0..31
+        return bucket * 0.00025f;
+    }
+
+    private static Node3D BuildInteractiveDummy(short type, int worldIndex, IMapObject obj, int ordinal)
+    {
+        var node = new Node3D
+        {
+            Name = $"ObjDummy_{type}_{ordinal}"
+        };
+
+        var pos = obj.Position;
+        node.Position = new Vector3(
+            pos.X * MuConfig.WorldToGodot,
+            pos.Z * MuConfig.WorldToGodot,
+            -pos.Y * MuConfig.WorldToGodot
+        );
+        node.Basis = new Basis(MuAngleToGodotQuat(obj.Angle));
+
+        float scale = obj.Scale;
+        if (scale > 0.001f)
+            node.Scale = new Vector3(scale, scale, scale);
+
+        node.SetMeta("mu_type", type);
+        node.SetMeta("mu_world", worldIndex);
+        return node;
     }
 }

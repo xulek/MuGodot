@@ -62,6 +62,7 @@ public partial class Main : Node3D
 	private MuGrassRenderer? _grassRenderer;
 	private LorenciaAmbientManager? _ambientManager;
 	private LorenciaHouseOcclusionSystem? _houseOcclusionSystem;
+	private LorenciaInteractionSystem _lorenciaInteractionSystem = new();
 	private CameraController _cameraController = null!;
 	private ObjectCullingSystem _cullingSystem = null!;
 	private WorldAudioManager? _audioManager;
@@ -132,6 +133,7 @@ public partial class Main : Node3D
 			?? new DarkWizardController { Name = "DarkWizardController" };
 		if (_darkWizardController.GetParent() == null) AddChild(_darkWizardController);
 		_darkWizardController.Initialize(_modelBuilder, _terrainBuilder, _cameraController.Camera, DataPath, _cameraController.ResetAndUpdate);
+		_ = _lorenciaInteractionSystem.InitializeAsync(_cameraController.Camera, _darkWizardController);
 
 		ApplyEditorPerformanceSettings();
 		EnsureEditorSceneOwnership();
@@ -234,6 +236,7 @@ public partial class Main : Node3D
 					assignEditorOwnership: assignOwnership);
 				_cullingSystem.RebuildCaches(_objectsRoot);
 				_houseOcclusionSystem?.RebuildCaches(_objectsRoot, WorldIndex);
+				_lorenciaInteractionSystem.RebuildCaches(_objectsRoot, WorldIndex);
 				if (FullObjectOwnershipPassInEditor)
 					ExposeGeneratedNodesInEditor(_objectsRoot);
 			}
@@ -241,6 +244,7 @@ public partial class Main : Node3D
 			{
 				_cullingSystem.RebuildCaches(_objectsRoot);
 				_houseOcclusionSystem?.RebuildCaches(_objectsRoot, WorldIndex);
+				_lorenciaInteractionSystem.RebuildCaches(_objectsRoot, WorldIndex);
 			}
 
 			if (_ambientManager != null)
@@ -429,6 +433,8 @@ public partial class Main : Node3D
 		if (@event is InputEventMouseButton mouseButton && mouseButton.Pressed &&
 			mouseButton.ButtonIndex == MouseButton.Left)
 		{
+			if (_lorenciaInteractionSystem.TryHandleLeftClick(mouseButton.Position))
+				return;
 			_darkWizardController.HandleInput(mouseButton.Position);
 		}
 	}
@@ -442,6 +448,10 @@ public partial class Main : Node3D
 		{
 			_darkWizardController.Update(delta);
 			_cameraController.Update(delta);
+			_lorenciaInteractionSystem.Update(
+				delta,
+				GetViewport().GetMousePosition(),
+				Input.IsMouseButtonPressed(MouseButton.Left));
 		}
 
 		_houseOcclusionSystem?.UpdateOcclusion(delta, WorldIndex, enabledInCurrentMode: !isEditor);
