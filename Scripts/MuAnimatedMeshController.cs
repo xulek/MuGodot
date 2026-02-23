@@ -30,7 +30,7 @@ public partial class MuAnimatedMeshController : Node
     private MuModelBuilder? _modelBuilder;
     private BMD? _modelBmd;
     private BMD? _animationSourceBmd;
-    private StandardMaterial3D[] _materials = [];
+    private Material[] _materials = [];
     private int _actionIndex;
     private ArrayMesh? _realtimeMesh;
     public int ActionIndex => _actionIndex;
@@ -39,7 +39,7 @@ public partial class MuAnimatedMeshController : Node
     public void Initialize(
         MuModelBuilder modelBuilder,
         BMD bmd,
-        StandardMaterial3D[]? materials,
+        Material[]? materials,
         int actionIndex = 0,
         float animationSpeed = 4f,
         float startFrame = 0f,
@@ -341,7 +341,7 @@ public partial class MuAnimatedMeshController : Node
         return wrapped < 0f ? wrapped + frameCount : wrapped;
     }
 
-    private static void ApplyMaterials(ArrayMesh mesh, StandardMaterial3D[] materials)
+    private static void ApplyMaterials(ArrayMesh mesh, Material[] materials)
     {
         int surfaceCount = mesh.GetSurfaceCount();
         int count = Math.Min(surfaceCount, materials.Length);

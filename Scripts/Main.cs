@@ -76,6 +76,8 @@ public partial class Main : Node3D
 	private OptionButton? _rightWeaponOption;
 	private OptionButton? _wingOption;
 	private SpinBox? _itemLevelSpin;
+	private CheckBox? _excellentCheck;
+	private CheckBox? _ancientCheck;
 	private bool _suppressEquipmentUiEvents;
 	private bool _loading;
 	private float _editorOwnerSyncTimer;
@@ -207,12 +209,16 @@ public partial class Main : Node3D
 		AddEquipmentField(flow, "Right Hand", out _rightWeaponOption);
 		AddEquipmentField(flow, "Wing", out _wingOption);
 		AddItemLevelField(flow);
+		AddItemFlagField(flow, "Excellent", out _excellentCheck);
+		AddItemFlagField(flow, "Ancient", out _ancientCheck);
 
 		_armorOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
 		_leftWeaponOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
 		_rightWeaponOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
 		_wingOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
 		_itemLevelSpin?.Connect("value_changed", Callable.From<double>(OnEquipmentLevelChanged));
+		_excellentCheck?.Connect("toggled", Callable.From<bool>(OnEquipmentFlagChanged));
+		_ancientCheck?.Connect("toggled", Callable.From<bool>(OnEquipmentFlagChanged));
 	}
 
 	private static void AddEquipmentField(Godot.Container parent, string label, out OptionButton option)
@@ -246,9 +252,30 @@ public partial class Main : Node3D
 		box.AddChild(_itemLevelSpin);
 	}
 
+	private static void AddItemFlagField(Godot.Container parent, string label, out CheckBox checkBox)
+	{
+		var box = new VBoxContainer
+		{
+			CustomMinimumSize = new Vector2(110, 0)
+		};
+		parent.AddChild(box);
+		box.AddChild(new Label { Text = label });
+		checkBox = new CheckBox
+		{
+			Text = "On"
+		};
+		box.AddChild(checkBox);
+	}
+
 	private async Task PopulateEquipmentUiAsync()
 	{
-		if (_armorOption == null || _leftWeaponOption == null || _rightWeaponOption == null || _wingOption == null || _itemLevelSpin == null)
+		if (_armorOption == null ||
+			_leftWeaponOption == null ||
+			_rightWeaponOption == null ||
+			_wingOption == null ||
+			_itemLevelSpin == null ||
+			_excellentCheck == null ||
+			_ancientCheck == null)
 			return;
 
 		var uiData = await _darkWizardController.GetEquipmentUiDataAsync();
@@ -260,6 +287,8 @@ public partial class Main : Node3D
 			FillWeaponOptions(_rightWeaponOption, uiData.Weapons, uiData.Current.RightHandGroup, uiData.Current.RightHandId);
 			FillWingOptions(_wingOption, uiData.Wings, uiData.Current.WingId);
 			_itemLevelSpin.Value = uiData.Current.ItemLevel;
+			_excellentCheck.ButtonPressed = uiData.Current.IsExcellent;
+			_ancientCheck.ButtonPressed = uiData.Current.IsAncient;
 		}
 		finally
 		{
@@ -351,9 +380,22 @@ public partial class Main : Node3D
 		_ = ApplyEquipmentFromUiAsync();
 	}
 
+	private void OnEquipmentFlagChanged(bool _value)
+	{
+		if (_suppressEquipmentUiEvents)
+			return;
+		_ = ApplyEquipmentFromUiAsync();
+	}
+
 	private async Task ApplyEquipmentFromUiAsync()
 	{
-		if (_armorOption == null || _leftWeaponOption == null || _rightWeaponOption == null || _wingOption == null || _itemLevelSpin == null)
+		if (_armorOption == null ||
+			_leftWeaponOption == null ||
+			_rightWeaponOption == null ||
+			_wingOption == null ||
+			_itemLevelSpin == null ||
+			_excellentCheck == null ||
+			_ancientCheck == null)
 			return;
 		if (_loading)
 			return;
@@ -372,6 +414,8 @@ public partial class Main : Node3D
 		var preset = new DarkWizardController.EquipmentPreset(
 			armorId,
 			(int)_itemLevelSpin.Value,
+			_excellentCheck.ButtonPressed,
+			_ancientCheck.ButtonPressed,
 			left.Group,
 			left.Id,
 			right.Group,

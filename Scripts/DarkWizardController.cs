@@ -23,6 +23,7 @@ public partial class DarkWizardController : Node3D
 	private const int LeftHandBoneIndex = 33;
 	private const int RightHandBoneIndex = 42;
 	private const int WingBoneIndex = 47;
+	private const string ItemMaterialShaderPath = "res://Shaders/ItemMaterial.gdshader";
 	private static readonly byte[] ArmorGroupsByPart = { 7, 8, 9, 10, 11 };
 	private static readonly string[] BodyPartPrefixes =
 	{
@@ -48,11 +49,15 @@ public partial class DarkWizardController : Node3D
 	[ExportGroup("DarkWizard Equipment")]
 	[Export] public int EquippedArmorSetId { get; set; } = -1;
 	[Export] public int EquippedItemLevel { get; set; } = 13;
+	[Export] public bool EquippedIsExcellent { get; set; } = false;
+	[Export] public bool EquippedIsAncient { get; set; } = false;
 	[Export] public int EquippedLeftHandGroup { get; set; } = -1;
 	[Export] public int EquippedLeftHandId { get; set; } = -1;
 	[Export] public int EquippedRightHandGroup { get; set; } = -1;
 	[Export] public int EquippedRightHandId { get; set; } = -1;
 	[Export] public int EquippedWingId { get; set; } = -1;
+	[Export(PropertyHint.Range, "0,1.5,0.01")] public float ItemGlowIntensityScale { get; set; } = 0.8f;
+	[Export(PropertyHint.Range, "0,1,0.01")] public float ItemEffectMix { get; set; } = 0.55f;
 	[ExportGroup("DarkWizard Equipment Bones")]
 	[Export] public int LeftHandBoneLink { get; set; } = LeftHandBoneIndex;
 	[Export] public int RightHandBoneLink { get; set; } = RightHandBoneIndex;
@@ -79,6 +84,7 @@ public partial class DarkWizardController : Node3D
 	private MuItemCatalog _itemCatalog = new();
 	private BMD? _skeletonBmd;
 	private readonly SemaphoreSlim _equipmentUpdateLock = new(1, 1);
+	private static Shader? s_itemMaterialShader;
 
 	private sealed class EquipmentAttachmentRuntime
 	{
@@ -135,6 +141,8 @@ public partial class DarkWizardController : Node3D
 	public sealed record EquipmentPreset(
 		int ArmorSetId,
 		int ItemLevel,
+		bool IsExcellent,
+		bool IsAncient,
 		int LeftHandGroup,
 		int LeftHandId,
 		int RightHandGroup,
@@ -157,6 +165,8 @@ public partial class DarkWizardController : Node3D
 			new EquipmentPreset(
 				EquippedArmorSetId,
 				EquippedItemLevel,
+				EquippedIsExcellent,
+				EquippedIsAncient,
 				EquippedLeftHandGroup,
 				EquippedLeftHandId,
 				EquippedRightHandGroup,
@@ -172,6 +182,8 @@ public partial class DarkWizardController : Node3D
 			SyncAttachmentBoneLinks();
 			EquippedArmorSetId = preset.ArmorSetId;
 			EquippedItemLevel = Math.Clamp(preset.ItemLevel, 0, 15);
+			EquippedIsExcellent = preset.IsExcellent;
+			EquippedIsAncient = preset.IsAncient;
 			EquippedLeftHandGroup = preset.LeftHandGroup;
 			EquippedLeftHandId = preset.LeftHandId;
 			EquippedRightHandGroup = preset.RightHandGroup;
@@ -370,6 +382,60 @@ public partial class DarkWizardController : Node3D
 		_itemCatalog = await MuItemCatalog.LoadAsync(_dataPath);
 	}
 
+	private bool ShouldUseItemMaterialShader()
+	{
+		return EquippedItemLevel >= 7 || EquippedIsExcellent || EquippedIsAncient;
+	}
+
+	private int BuildItemOptions()
+	{
+		int options = EquippedItemLevel & 0x0F;
+		if (EquippedIsExcellent)
+			options |= 0x10;
+		return options;
+	}
+
+	private Material[] BuildEquipmentMaterials(StandardMaterial3D[] sourceMaterials, bool applyItemVisuals)
+	{
+		if (!applyItemVisuals || !ShouldUseItemMaterialShader())
+			return sourceMaterials;
+
+		var shader = s_itemMaterialShader;
+		if (shader == null || !GodotObject.IsInstanceValid(shader))
+		{
+			shader = ResourceLoader.Load<Shader>(ItemMaterialShaderPath);
+			s_itemMaterialShader = shader;
+		}
+
+		if (shader == null || !GodotObject.IsInstanceValid(shader))
+			return sourceMaterials;
+
+		var result = new Material[sourceMaterials.Length];
+		int itemOptions = BuildItemOptions();
+		for (int i = 0; i < sourceMaterials.Length; i++)
+		{
+			var src = sourceMaterials[i];
+			if (src == null || src.AlbedoTexture == null)
+			{
+				result[i] = src;
+				continue;
+			}
+
+			var shaderMat = new ShaderMaterial { Shader = shader };
+			shaderMat.SetShaderParameter("diffuse_texture", src.AlbedoTexture);
+			shaderMat.SetShaderParameter("item_options", itemOptions);
+			shaderMat.SetShaderParameter("is_ancient", EquippedIsAncient);
+			shaderMat.SetShaderParameter("is_excellent", EquippedIsExcellent);
+			shaderMat.SetShaderParameter("glow_color", new Vector3(0.6f, 0.5f, 0.0f));
+			shaderMat.SetShaderParameter("light_direction", new Vector3(0.707f, -0.707f, 0f));
+			shaderMat.SetShaderParameter("glow_intensity_scale", ItemGlowIntensityScale);
+			shaderMat.SetShaderParameter("effect_mix", ItemEffectMix);
+			result[i] = shaderMat;
+		}
+
+		return result;
+	}
+
 	private void SyncAttachmentBoneLinks()
 	{
 		LeftHandBoneLink = Math.Max(0, LeftHandBoneLink);
@@ -454,21 +520,22 @@ public partial class DarkWizardController : Node3D
 		for (int i = 0; i < BodyPartPrefixes.Length; i++)
 		{
 			string prefix = BodyPartPrefixes[i];
-			string? partModelPath = await ResolveBodyPartModelPathAsync(prefix, i, classId);
-			if (string.IsNullOrWhiteSpace(partModelPath))
+			var bodyPart = await ResolveBodyPartModelPathAsync(prefix, i, classId);
+			if (string.IsNullOrWhiteSpace(bodyPart.Path))
 				continue;
 
-			BMD? partBmd = await _modelBuilder.LoadBmdAsync(partModelPath, logMissing: false);
+			BMD? partBmd = await _modelBuilder.LoadBmdAsync(bodyPart.Path, logMissing: false);
 			if (partBmd == null)
 				continue;
 
-			var materials = await _modelBuilder.LoadModelTexturesAsync(partModelPath);
+			var materials = await _modelBuilder.LoadModelTexturesAsync(bodyPart.Path);
+			var renderMaterials = BuildEquipmentMaterials(materials, bodyPart.UsesItemVisual);
 			var meshInstance = new MeshInstance3D { Name = prefix };
 			root.AddChild(meshInstance);
 			_meshes.Add(meshInstance);
 
 			var idleController = CreateAnimationController(
-				root, partBmd, materials, idleAction,
+				root, partBmd, renderMaterials, idleAction,
 				$"{prefix}_Idle", skeletonBmd, subFrameSamples, animationSyncStartSeconds);
 			var idleMesh = idleController.GetCurrentMesh();
 			if (idleMesh == null)
@@ -486,7 +553,7 @@ public partial class DarkWizardController : Node3D
 			if (walkAction != idleAction)
 			{
 				var walkController = CreateAnimationController(
-					root, partBmd, materials, walkAction,
+					root, partBmd, renderMaterials, walkAction,
 					$"{prefix}_Walk", skeletonBmd, subFrameSamples, animationSyncStartSeconds);
 				var walkMesh = walkController.GetCurrentMesh();
 				if (walkMesh != null)
@@ -501,10 +568,10 @@ public partial class DarkWizardController : Node3D
 			}
 
 			TryCreateOptionalPoseController(
-				root, partBmd, materials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
+				root, partBmd, renderMaterials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
 				DarkWizardSitActionIndex, idleAction, walkAction, "_Sit", _sitControllers, meshInstance);
 			TryCreateOptionalPoseController(
-				root, partBmd, materials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
+				root, partBmd, renderMaterials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
 				DarkWizardRestActionIndex, idleAction, walkAction, "_Rest", _restControllers, meshInstance);
 
 			hasRenderablePart = true;
@@ -515,24 +582,27 @@ public partial class DarkWizardController : Node3D
 		return hasRenderablePart;
 	}
 
-	private async Task<string?> ResolveBodyPartModelPathAsync(string prefix, int partIndex, int classId)
+	private async Task<(string? Path, bool UsesItemVisual)> ResolveBodyPartModelPathAsync(string prefix, int partIndex, int classId)
 	{
 		// Reset to the class default first, just like the reference flow before reapplying item visuals.
 		string classPath = BuildPartModelPath(prefix, classId);
 		string resolvedClassPath = await ResolveExistingModelPathAsync(classPath) ?? classPath;
 		if (EquippedArmorSetId < 0 || partIndex < 0 || partIndex >= ArmorGroupsByPart.Length)
-			return resolvedClassPath;
+			return (resolvedClassPath, false);
 
 		byte group = ArmorGroupsByPart[partIndex];
 		short id = (short)EquippedArmorSetId;
 		var itemDef = _itemCatalog.Get(group, id);
 		if (itemDef == null || string.IsNullOrWhiteSpace(itemDef.TexturePath))
-			return resolvedClassPath;
+			return (resolvedClassPath, false);
 
 		string playerPath = itemDef.TexturePath.Replace("Item/", "Player/", StringComparison.OrdinalIgnoreCase);
 		string? resolvedItemPath = await ResolveExistingModelPathAsync(playerPath)
 			?? await ResolveExistingModelPathAsync(itemDef.TexturePath);
-		return resolvedItemPath ?? resolvedClassPath;
+		if (!string.IsNullOrWhiteSpace(resolvedItemPath))
+			return (resolvedItemPath, true);
+
+		return (resolvedClassPath, false);
 	}
 
 	private async Task<string?> ResolveExistingModelPathAsync(string relativePath)
@@ -611,6 +681,7 @@ public partial class DarkWizardController : Node3D
 			return;
 
 		var materials = await _modelBuilder.LoadModelTexturesAsync(modelPath);
+		var renderMaterials = BuildEquipmentMaterials(materials, applyItemVisuals: true);
 		var pivot = new Node3D { Name = nodeName };
 		var itemMesh = new MeshInstance3D { Name = $"{nodeName}Mesh" };
 		pivot.AddChild(itemMesh);
@@ -629,7 +700,7 @@ public partial class DarkWizardController : Node3D
 			animController.Initialize(
 				_modelBuilder,
 				itemBmd,
-				materials,
+				renderMaterials,
 				actionIndex: 0,
 				animationSpeed: 4f,
 				subFrameSamples: 8,
@@ -643,10 +714,10 @@ public partial class DarkWizardController : Node3D
 		ArrayMesh? mesh = _modelBuilder.BuildMesh(itemBmd, actionIndex: 0, framePos: 0f);
 		if (mesh == null)
 			return;
-		for (int s = 0; s < mesh.GetSurfaceCount() && s < materials.Length; s++)
+		for (int s = 0; s < mesh.GetSurfaceCount() && s < renderMaterials.Length; s++)
 		{
-			if (materials[s] != null)
-				mesh.SurfaceSetMaterial(s, materials[s]);
+			if (renderMaterials[s] != null)
+				mesh.SurfaceSetMaterial(s, renderMaterials[s]);
 		}
 		itemMesh.Mesh = mesh;
 	}
@@ -654,7 +725,7 @@ public partial class DarkWizardController : Node3D
 	private MuAnimatedMeshController CreateAnimationController(
 		Node3D parent,
 		BMD bmd,
-		StandardMaterial3D[] materials,
+		Material[] materials,
 		int actionIndex,
 		string suffix,
 		BMD? animationSourceBmd = null,
@@ -684,7 +755,7 @@ public partial class DarkWizardController : Node3D
 	private void TryCreateOptionalPoseController(
 		Node3D root,
 		BMD partBmd,
-		StandardMaterial3D[] materials,
+		Material[] materials,
 		BMD skeletonBmd,
 		int subFrameSamples,
 		float animationSyncStartSeconds,
