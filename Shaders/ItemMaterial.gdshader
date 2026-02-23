@@ -1,16 +1,24 @@
 shader_type spatial;
-render_mode unshaded, cull_disabled, blend_mix, depth_prepass_alpha;
+render_mode cull_disabled, blend_mix, depth_prepass_alpha;
 
 uniform sampler2D diffuse_texture : source_color, filter_nearest, repeat_enable;
+uniform sampler2D normal_texture : hint_normal;
+uniform bool use_normal_map = false;
+uniform float normal_map_depth : hint_range(0.0, 2.0) = 1.0;
 uniform int item_options = 0;
 uniform vec3 glow_color = vec3(0.6, 0.5, 0.0);
 uniform bool is_ancient = false;
 uniform bool is_excellent = false;
-uniform vec3 light_direction = vec3(0.707, -0.707, 0.0);
 uniform float alpha_cutoff = 0.1;
 uniform float glow_intensity_scale = 0.8;
-uniform float shadow_strength = 0.5;
 uniform float effect_mix = 0.55;
+uniform float metallic_amount : hint_range(0.0, 1.0) = 0.1;
+uniform float roughness_amount : hint_range(0.0, 1.0) = 0.7;
+uniform float specular_amount : hint_range(0.0, 1.0) = 0.5;
+uniform float rim_intensity : hint_range(0.0, 1.0) = 0.2;
+uniform float rim_power : hint_range(1.0, 8.0) = 3.0;
+uniform vec3 rim_tint = vec3(0.8, 0.85, 1.0);
+uniform float env_reflection_intensity : hint_range(0.0, 1.0) = 0.15;
 
 const float MONOGAME_GAMMA = 2.2;
 
@@ -45,20 +53,26 @@ void fragment() {
 		discard;
 	}
 
+	// Normal map for surface detail
+	if (use_normal_map) {
+		NORMAL_MAP = texture(normal_texture, UV).rgb;
+		NORMAL_MAP_DEPTH = normal_map_depth;
+	}
+
 	float item_options_f = max(0.0, float(item_options));
 	float item_level = item_options_f - floor(item_options_f * (1.0 / 16.0)) * 16.0;
 	bool excellent_active = is_excellent;
 
 	vec3 normal = normalize(NORMAL);
-	float light_intensity = max(0.1, dot(normal, -normalize(light_direction)));
-	color.rgb *= light_intensity;
-	vec3 base_lit_color = color.rgb;
+	vec3 base_color = color.rgb;
+	vec3 raw_base = color.rgb;
 	float wave_base = fract(TIME * 0.001) * 10000.0 * 0.0001;
 	vec3 view = normalize(VIEW) + normal + vec3(10000.5, 10000.5, 10000.5);
 
 	vec3 effect_color = glow_color * glow_intensity_scale;
 	float brightness = 1.0;
 	float ghost_intensity = 0.0;
+	vec3 emission = vec3(0.0);
 
 	if (item_level < 7.0) {
 		brightness = 1.0;
@@ -106,22 +120,23 @@ void fragment() {
 	vec4 excellent_ghost6 = sample_monogame_space(UV + excellent_offset6);
 
 	if (item_level >= 7.0) {
-		vec3 metallic = effect_color * 0.8;
-		color.rgb = color.rgb * metallic * brightness * subtle_pulse;
-		color.rgb += ghost1.rgb * (0.8 * ghost_intensity) * shimmer * glow_intensity_scale;
-		color.rgb += ghost2.rgb * (0.6 * ghost_intensity) * shimmer * glow_intensity_scale;
-		color.rgb += ghost3.rgb * (0.5 * ghost_intensity) * shimmer * glow_intensity_scale;
-		color.rgb += ghost4.rgb * (0.4 * ghost_intensity) * shimmer * glow_intensity_scale;
+		vec3 metallic_tint = effect_color * 0.8;
+		base_color = base_color * metallic_tint * brightness * subtle_pulse;
+		emission += ghost1.rgb * (0.8 * ghost_intensity) * shimmer * glow_intensity_scale;
+		emission += ghost2.rgb * (0.6 * ghost_intensity) * shimmer * glow_intensity_scale;
+		emission += ghost3.rgb * (0.5 * ghost_intensity) * shimmer * glow_intensity_scale;
+		emission += ghost4.rgb * (0.4 * ghost_intensity) * shimmer * glow_intensity_scale;
 	} else {
-		color.rgb *= brightness;
+		base_color *= brightness;
 	}
 
 	float extra_glow = (item_level - 9.0) * 0.1;
 	float glow_effect = (1.0 + sin(TIME * 1.0)) * 0.03 + 0.2;
 	if (item_level >= 10.0) {
-		color.rgb += effect_color * glow_effect * extra_glow;
+		emission += effect_color * glow_effect * extra_glow;
 	}
 
+	// Ancient effect
 	float ancient_enabled = is_ancient ? 1.0 : 0.0;
 	vec3 ancient_color = vec3(0.3, 0.5, 1.0);
 
@@ -142,13 +157,14 @@ void fragment() {
 	float wave2 = sin(TIME * 3.0 + UV.y * 6.0) * 0.3 + 0.7;
 	float combined_wave = beam_intensity * wave2;
 	float level_boost = item_level >= 9.0 ? 2.0 : 1.0;
-	color.rgb += ancient_ghost1.rgb * ancient_color * combined_wave * 1.5 * level_boost * ancient_enabled;
-	color.rgb += ancient_ghost2.rgb * ancient_color * combined_wave * 1.1 * level_boost * ancient_enabled;
+	emission += ancient_ghost1.rgb * ancient_color * combined_wave * 1.5 * level_boost * ancient_enabled;
+	emission += ancient_ghost2.rgb * ancient_color * combined_wave * 1.1 * level_boost * ancient_enabled;
 
 	float base_glow = sin(TIME * 0.8) * 0.08 + 0.15;
 	float base_glow_intensity = item_level >= 9.0 ? 0.5 : 0.25;
-	color.rgb += color.rgb * ancient_color * base_glow * base_glow_intensity * ancient_enabled;
+	emission += base_color * ancient_color * base_glow * base_glow_intensity * ancient_enabled;
 
+	// Excellent sweep effect
 	float excellent_sweep_enabled = (excellent_active && item_level >= 7.0) ? 1.0 : 0.0;
 	vec3 excellent_sweep_color = vec3(0.5, 0.3, 0.7);
 	float ex_cycle_speed = 0.12;
@@ -166,12 +182,13 @@ void fragment() {
 	float ex_wave2 = sin(TIME * 3.5 + UV.y * 6.0) * 0.3 + 0.7;
 	float ex_combined_wave = ex_beam_intensity * ex_wave2;
 	float ex_level_boost = item_level >= 9.0 ? 1.5 : 1.0;
-	color.rgb += excellent_ghost1.rgb * excellent_sweep_color * ex_combined_wave * 1.2 * ex_level_boost * excellent_sweep_enabled;
-	color.rgb += excellent_ghost2.rgb * excellent_sweep_color * ex_combined_wave * 0.9 * ex_level_boost * excellent_sweep_enabled;
+	emission += excellent_ghost1.rgb * excellent_sweep_color * ex_combined_wave * 1.2 * ex_level_boost * excellent_sweep_enabled;
+	emission += excellent_ghost2.rgb * excellent_sweep_color * ex_combined_wave * 0.9 * ex_level_boost * excellent_sweep_enabled;
 	float ex_base_glow = sin(TIME * 0.9) * 0.08 + 0.12;
 	float ex_base_glow_intensity = item_level >= 9.0 ? 0.4 : 0.2;
-	color.rgb += color.rgb * excellent_sweep_color * ex_base_glow * ex_base_glow_intensity * excellent_sweep_enabled;
+	emission += base_color * excellent_sweep_color * ex_base_glow * ex_base_glow_intensity * excellent_sweep_enabled;
 
+	// Excellent rainbow/fresnel effect
 	float excellent_enabled = excellent_active ? 1.0 : 0.0;
 	vec3 view_dir = normalize(VIEW);
 	float fresnel = 1.0 - clamp(dot(view_dir, normal), 0.0, 1.0);
@@ -208,29 +225,74 @@ void fragment() {
 	float color_wave3 = sin(TIME * 0.7 + (UV.x + UV.y) * 2.5) * 0.5 + 0.5;
 	vec3 wave_color = rainbow1 * color_wave1 + rainbow2 * color_wave2 + rainbow3 * (1.0 - color_wave1 * color_wave2);
 	wave_color = normalize(wave_color) * length(wave_color) * 0.4;
-	color.rgb += vec3((wave_base + view.x + color_wave3) * 0.0);
+	base_color += vec3((wave_base + view.x + color_wave3) * 0.0);
 
 	float ghost_base_intensity = 0.2 * combined_pulse + 0.1;
-	color.rgb += excellent_ghost1.rgb * rainbow1 * ghost_base_intensity * (1.0 * ex_scale) * excellent_enabled;
-	color.rgb += excellent_ghost2.rgb * rainbow2 * ghost_base_intensity * (0.9 * ex_scale) * excellent_enabled;
-	color.rgb += excellent_ghost3.rgb * rainbow3 * ghost_base_intensity * (0.8 * ex_scale) * excellent_enabled;
-	color.rgb += excellent_ghost4.rgb * rainbow4 * ghost_base_intensity * (0.7 * ex_scale) * excellent_enabled;
-	color.rgb += excellent_ghost5.rgb * wave_color * ghost_base_intensity * (0.6 * ex_scale) * excellent_enabled;
-	color.rgb += excellent_ghost6.rgb * rainbow1 * ghost_base_intensity * (0.5 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost1.rgb * rainbow1 * ghost_base_intensity * (1.0 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost2.rgb * rainbow2 * ghost_base_intensity * (0.9 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost3.rgb * rainbow3 * ghost_base_intensity * (0.8 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost4.rgb * rainbow4 * ghost_base_intensity * (0.7 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost5.rgb * wave_color * ghost_base_intensity * (0.6 * ex_scale) * excellent_enabled;
+	emission += excellent_ghost6.rgb * rainbow1 * ghost_base_intensity * (0.5 * ex_scale) * excellent_enabled;
 
 	vec3 beam_color = mix(rainbow1, rainbow2, sin(TIME * 0.4) * 0.5 + 0.5);
-	color.rgb += beam_color * combined_beams * 0.05 * excellent_enabled;
-	vec3 rim_color = mix(rainbow3, rainbow4, fresnel);
-	color.rgb += rim_color * fresnel * 0.05 * excellent_enabled;
+	emission += beam_color * combined_beams * 0.05 * excellent_enabled;
+	vec3 ex_rim_color = mix(rainbow3, rainbow4, fresnel);
+	emission += ex_rim_color * fresnel * 0.05 * excellent_enabled;
 	vec3 overlay_color = wave_color * 0.015;
-	color.rgb += color.rgb * overlay_color * excellent_enabled;
-	color.rgb *= mix(1.0, 1.4, excellent_enabled);
-	float shadow_term = 1.0;
-	float shadow_mix = mix(1.0 - shadow_strength, 1.0, shadow_term);
-	color.rgb *= shadow_mix;
-	color.rgb = mix(base_lit_color, color.rgb, clamp(effect_mix, 0.0, 1.0));
+	base_color += base_color * overlay_color * excellent_enabled;
+	base_color *= mix(1.0, 1.4, excellent_enabled);
 
-	ALBEDO = from_monogame_space(clamp(color.rgb, vec3(0.0), vec3(1.0)));
+	// Rim light - edge glow for 3D depth
+	float rim = 1.0 - max(dot(view_dir, normal), 0.0);
+	rim = pow(rim, rim_power);
+	float rim_level_scale = 1.0;
+	if (item_level >= 7.0) rim_level_scale = 1.5;
+	if (item_level >= 10.0) rim_level_scale = 2.0;
+	vec3 rim_emission = rim_tint * rim * rim_intensity * rim_level_scale;
+	rim_emission = mix(rim_emission, rim_emission * ancient_color * 2.0, ancient_enabled * 0.5);
+	rim_emission = mix(rim_emission, rim_emission * rainbow1 * 2.0, excellent_enabled * 0.5);
+	emission += rim_emission;
+
+	// Fake environment reflection for metallic items
+	if (item_level >= 7.0) {
+		vec3 reflect_dir = reflect(-view_dir, normal);
+		float sky_factor = reflect_dir.y * 0.5 + 0.5;
+		vec3 env_top = vec3(0.5, 0.55, 0.8);
+		vec3 env_bottom = vec3(0.15, 0.1, 0.08);
+		vec3 env_col = mix(env_bottom, env_top, sky_factor);
+		env_col *= effect_color * 1.5;
+		float fresnel_env = pow(1.0 - max(dot(view_dir, normal), 0.0), 3.0);
+		float ref_strength = env_reflection_intensity * mix(0.3, 1.0, fresnel_env);
+		emission += env_col * ref_strength;
+	}
+
+	// Dynamic PBR based on item level
+	float final_metallic = metallic_amount;
+	float final_roughness = roughness_amount;
+	if (item_level >= 7.0) {
+		final_metallic = max(metallic_amount, 0.3 + (item_level - 7.0) * 0.05);
+		final_roughness = min(roughness_amount, 0.55 - (item_level - 7.0) * 0.04);
+	}
+	if (excellent_active) {
+		final_metallic = max(final_metallic, 0.5);
+		final_roughness = min(final_roughness, 0.35);
+	}
+
+	// Final output
+	vec3 final_albedo = mix(raw_base, base_color, clamp(effect_mix, 0.0, 1.0));
+	vec3 final_emission = emission * clamp(effect_mix, 0.0, 1.0);
+
+	// Color grading - subtle contrast and saturation boost
+	final_albedo = clamp((final_albedo - 0.5) * 1.1 + 0.5, vec3(0.0), vec3(1.0));
+	float luma = dot(final_albedo, vec3(0.299, 0.587, 0.114));
+	final_albedo = mix(vec3(luma), final_albedo, 1.15);
+
+	ALBEDO = from_monogame_space(clamp(final_albedo, vec3(0.0), vec3(1.0)));
+	EMISSION = from_monogame_space(clamp(final_emission, vec3(0.0), vec3(4.0)));
 	ALPHA = color.a;
 	ALPHA_SCISSOR_THRESHOLD = alpha_cutoff;
+	METALLIC = clamp(final_metallic, 0.0, 1.0);
+	ROUGHNESS = clamp(final_roughness, 0.0, 1.0);
+	SPECULAR = specular_amount;
 }
