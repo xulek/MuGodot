@@ -3,6 +3,7 @@ using Client.Data.ATT;
 using Client.Data.BMD;
 using Client.Data.CAP;
 using MuGodot.Audio;
+using System.Threading;
 
 namespace MuGodot;
 
@@ -19,6 +20,10 @@ public partial class DarkWizardController : Node3D
 	private const float MonoGameMoveSpeed = 300f * MuConfig.WorldToGodot;
 	private const int IdleAction = 1;
 	private const int WalkAction = 15;
+	private const int LeftHandBoneIndex = 33;
+	private const int RightHandBoneIndex = 42;
+	private const int WingBoneIndex = 47;
+	private static readonly byte[] ArmorGroupsByPart = { 7, 8, 9, 10, 11 };
 	private static readonly string[] BodyPartPrefixes =
 	{
 		"HelmClass",
@@ -40,6 +45,25 @@ public partial class DarkWizardController : Node3D
 	[Export] public bool DarkWizardRealtimeInterpolation { get; set; } = true;
 	[Export] public int DarkWizardSitActionIndex { get; set; } = 233;
 	[Export] public int DarkWizardRestActionIndex { get; set; } = 239;
+	[ExportGroup("DarkWizard Equipment")]
+	[Export] public int EquippedArmorSetId { get; set; } = -1;
+	[Export] public int EquippedItemLevel { get; set; } = 13;
+	[Export] public int EquippedLeftHandGroup { get; set; } = -1;
+	[Export] public int EquippedLeftHandId { get; set; } = -1;
+	[Export] public int EquippedRightHandGroup { get; set; } = -1;
+	[Export] public int EquippedRightHandId { get; set; } = -1;
+	[Export] public int EquippedWingId { get; set; } = -1;
+	[ExportGroup("DarkWizard Equipment Bones")]
+	[Export] public int LeftHandBoneLink { get; set; } = LeftHandBoneIndex;
+	[Export] public int RightHandBoneLink { get; set; } = RightHandBoneIndex;
+	[Export] public int WingBoneLink { get; set; } = WingBoneIndex;
+	[ExportGroup("DarkWizard Equipment Offsets")]
+	[Export] public Vector3 LeftHandItemOffset { get; set; } = Vector3.Zero;
+	[Export] public Vector3 LeftHandItemRotationDegrees { get; set; } = Vector3.Zero;
+	[Export] public Vector3 RightHandItemOffset { get; set; } = Vector3.Zero;
+	[Export] public Vector3 RightHandItemRotationDegrees { get; set; } = Vector3.Zero;
+	[Export] public Vector3 WingItemOffset { get; set; } = Vector3.Zero;
+	[Export] public Vector3 WingItemRotationDegrees { get; set; } = Vector3.Zero;
 	[ExportGroup("DarkWizard Audio")]
 	[Export] public string SitSoundPath { get; set; } = "Sound/pDropItem.wav";
 	[Export] public string RestSoundPath { get; set; } = "Sound/pDropItem.wav";
@@ -52,6 +76,21 @@ public partial class DarkWizardController : Node3D
 	private string _dataPath = "";
 	private Action? _onCameraReset;
 	private int _worldIndex;
+	private MuItemCatalog _itemCatalog = new();
+	private BMD? _skeletonBmd;
+	private readonly SemaphoreSlim _equipmentUpdateLock = new(1, 1);
+
+	private sealed class EquipmentAttachmentRuntime
+	{
+		public int BoneIndex;
+		public Node3D? Pivot;
+		public MuAnimatedMeshController? AnimationController;
+		public MeshInstance3D? MeshInstance;
+	}
+
+	private EquipmentAttachmentRuntime _leftAttachment = new() { BoneIndex = LeftHandBoneIndex };
+	private EquipmentAttachmentRuntime _rightAttachment = new() { BoneIndex = RightHandBoneIndex };
+	private EquipmentAttachmentRuntime _wingAttachment = new() { BoneIndex = WingBoneIndex };
 
 	private Node3D? _root;
 	private Node3D? _moveTargetMarker;
@@ -90,6 +129,67 @@ public partial class DarkWizardController : Node3D
 		_camera = camera;
 		_dataPath = dataPath;
 		_onCameraReset = onCameraReset;
+		SyncAttachmentBoneLinks();
+	}
+
+	public sealed record EquipmentPreset(
+		int ArmorSetId,
+		int ItemLevel,
+		int LeftHandGroup,
+		int LeftHandId,
+		int RightHandGroup,
+		int RightHandId,
+		int WingId);
+
+	public sealed record EquipmentUiData(
+		IReadOnlyList<MuItemCatalog.ItemDef> Armors,
+		IReadOnlyList<MuItemCatalog.ItemDef> Weapons,
+		IReadOnlyList<MuItemCatalog.ItemDef> Wings,
+		EquipmentPreset Current);
+
+	public async Task<EquipmentUiData> GetEquipmentUiDataAsync()
+	{
+		await EnsureItemCatalogAsync();
+		return new EquipmentUiData(
+			_itemCatalog.Armors,
+			_itemCatalog.Weapons,
+			_itemCatalog.Wings,
+			new EquipmentPreset(
+				EquippedArmorSetId,
+				EquippedItemLevel,
+				EquippedLeftHandGroup,
+				EquippedLeftHandId,
+				EquippedRightHandGroup,
+				EquippedRightHandId,
+				EquippedWingId));
+	}
+
+	public async Task ApplyEquipmentPresetAsync(EquipmentPreset preset)
+	{
+		await _equipmentUpdateLock.WaitAsync();
+		try
+		{
+			SyncAttachmentBoneLinks();
+			EquippedArmorSetId = preset.ArmorSetId;
+			EquippedItemLevel = Math.Clamp(preset.ItemLevel, 0, 15);
+			EquippedLeftHandGroup = preset.LeftHandGroup;
+			EquippedLeftHandId = preset.LeftHandId;
+			EquippedRightHandGroup = preset.RightHandGroup;
+			EquippedRightHandId = preset.RightHandId;
+			EquippedWingId = preset.WingId;
+
+			await EnsureItemCatalogAsync();
+			if (_root != null && GodotObject.IsInstanceValid(_root) && _skeletonBmd != null)
+			{
+				await RebuildBodyAndEquipmentAsync(_root, _skeletonBmd);
+				SetAnimationState(_moving, force: true);
+				UpdateEquipmentAttachmentTransforms();
+			}
+		}
+		finally
+		{
+			_equipmentUpdateLock.Release();
+		}
 	}
 
 	public Vector3 GetPosition()
@@ -165,6 +265,7 @@ public partial class DarkWizardController : Node3D
 
 	public void Reset()
 	{
+		SyncAttachmentBoneLinks();
 		_root = null;
 		_moveTargetMarker = null;
 		_moveTargetMesh = null;
@@ -184,10 +285,15 @@ public partial class DarkWizardController : Node3D
 		_footstepPlayer = null;
 		_posePlayer = null;
 		_footstepTimer = 0f;
+		_skeletonBmd = null;
+		_leftAttachment = new EquipmentAttachmentRuntime { BoneIndex = LeftHandBoneLink };
+		_rightAttachment = new EquipmentAttachmentRuntime { BoneIndex = RightHandBoneLink };
+		_wingAttachment = new EquipmentAttachmentRuntime { BoneIndex = WingBoneLink };
 	}
 
 	public async Task SpawnAsync(Node3D charactersRoot, int worldIndex, Action<string>? onStatus = null)
 	{
+		SyncAttachmentBoneLinks();
 		if (charactersRoot == null || !GodotObject.IsInstanceValid(charactersRoot))
 			return;
 
@@ -203,8 +309,10 @@ public partial class DarkWizardController : Node3D
 		_root = root;
 		EnsureAudioPlayers();
 
+		await EnsureItemCatalogAsync();
 		BMD? skeletonBmd = await _modelBuilder.LoadBmdAsync(DarkWizardModelPath);
-		if (skeletonBmd == null)
+		_skeletonBmd = skeletonBmd;
+		if (_skeletonBmd == null)
 		{
 			GD.PrintErr($"[DarkWizard] BMD not found: {DarkWizardModelPath}. Using fallback mesh.");
 			var meshInstance = new MeshInstance3D { Name = "FallbackBody" };
@@ -222,6 +330,120 @@ public partial class DarkWizardController : Node3D
 			return;
 		}
 
+		bool hasRenderablePart = await RebuildBodyAndEquipmentAsync(root, _skeletonBmd);
+		if (!hasRenderablePart)
+		{
+			GD.PrintErr($"[DarkWizard] No class body parts found for class {Math.Max(1, DarkWizardClassModelId)}. Using fallback mesh.");
+			var meshInstance = new MeshInstance3D { Name = "FallbackBody" };
+			root.AddChild(meshInstance);
+			_meshes.Add(meshInstance);
+			ApplyFallbackMesh(meshInstance);
+			_root.Position = spawn;
+			_moveTarget = spawn;
+			_path.Clear();
+			_targetYaw = _root.Rotation.Y;
+			_hasTargetYaw = true;
+			await EnsureMoveTargetMarkerAsync();
+			_onCameraReset?.Invoke();
+			onStatus?.Invoke("DarkWizard class models missing (using fallback).");
+			return;
+		}
+
+		_root.Position = spawn;
+		_moveTarget = spawn;
+		_path.Clear();
+		_targetYaw = _root.Rotation.Y;
+		_hasTargetYaw = true;
+		SetAnimationState(isMoving: false, force: true);
+		await EnsureMoveTargetMarkerAsync();
+		_onCameraReset?.Invoke();
+		GD.Print($"[DarkWizard] Spawned at {spawn}. Parts: {_meshes.Count}, walk controllers: {_walkControllers.Count}");
+	}
+
+	private async Task EnsureItemCatalogAsync()
+	{
+		if (_itemCatalog.Weapons.Count > 0 || _itemCatalog.Armors.Count > 0 || _itemCatalog.Wings.Count > 0)
+			return;
+		if (string.IsNullOrWhiteSpace(_dataPath) || !System.IO.Directory.Exists(_dataPath))
+			return;
+
+		_itemCatalog = await MuItemCatalog.LoadAsync(_dataPath);
+	}
+
+	private void SyncAttachmentBoneLinks()
+	{
+		LeftHandBoneLink = Math.Max(0, LeftHandBoneLink);
+		RightHandBoneLink = Math.Max(0, RightHandBoneLink);
+		WingBoneLink = Math.Max(0, WingBoneLink);
+
+		_leftAttachment.BoneIndex = LeftHandBoneLink;
+		_rightAttachment.BoneIndex = RightHandBoneLink;
+		_wingAttachment.BoneIndex = WingBoneLink;
+	}
+
+	private void ClearBodyControllersAndMeshes()
+	{
+		for (int i = 0; i < _idleControllers.Count; i++)
+		{
+			var c = _idleControllers[i];
+			if (c != null && GodotObject.IsInstanceValid(c))
+			{
+				if (c.GetParent() != null)
+					c.GetParent().RemoveChild(c);
+				c.QueueFree();
+			}
+		}
+		for (int i = 0; i < _walkControllers.Count; i++)
+		{
+			var c = _walkControllers[i];
+			if (c != null && GodotObject.IsInstanceValid(c))
+			{
+				if (c.GetParent() != null)
+					c.GetParent().RemoveChild(c);
+				c.QueueFree();
+			}
+		}
+		for (int i = 0; i < _sitControllers.Count; i++)
+		{
+			var c = _sitControllers[i];
+			if (c != null && GodotObject.IsInstanceValid(c))
+			{
+				if (c.GetParent() != null)
+					c.GetParent().RemoveChild(c);
+				c.QueueFree();
+			}
+		}
+		for (int i = 0; i < _restControllers.Count; i++)
+		{
+			var c = _restControllers[i];
+			if (c != null && GodotObject.IsInstanceValid(c))
+			{
+				if (c.GetParent() != null)
+					c.GetParent().RemoveChild(c);
+				c.QueueFree();
+			}
+		}
+		for (int i = 0; i < _meshes.Count; i++)
+		{
+			var mesh = _meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh))
+			{
+				if (mesh.GetParent() != null)
+					mesh.GetParent().RemoveChild(mesh);
+				mesh.QueueFree();
+			}
+		}
+
+		_idleControllers.Clear();
+		_walkControllers.Clear();
+		_sitControllers.Clear();
+		_restControllers.Clear();
+		_meshes.Clear();
+	}
+
+	private async Task<bool> RebuildBodyAndEquipmentAsync(Node3D root, BMD skeletonBmd)
+	{
+		ClearBodyControllersAndMeshes();
 		int idleAction = ClampActionIndex(skeletonBmd, IdleAction);
 		int walkAction = ClampActionIndex(skeletonBmd, WalkAction);
 		int classId = Math.Max(1, DarkWizardClassModelId);
@@ -232,7 +454,10 @@ public partial class DarkWizardController : Node3D
 		for (int i = 0; i < BodyPartPrefixes.Length; i++)
 		{
 			string prefix = BodyPartPrefixes[i];
-			string partModelPath = BuildPartModelPath(prefix, classId);
+			string? partModelPath = await ResolveBodyPartModelPathAsync(prefix, i, classId);
+			if (string.IsNullOrWhiteSpace(partModelPath))
+				continue;
+
 			BMD? partBmd = await _modelBuilder.LoadBmdAsync(partModelPath, logMissing: false);
 			if (partBmd == null)
 				continue;
@@ -276,65 +501,154 @@ public partial class DarkWizardController : Node3D
 			}
 
 			TryCreateOptionalPoseController(
-				root,
-				partBmd,
-				materials,
-				skeletonBmd,
-				subFrameSamples,
-				animationSyncStartSeconds,
-				prefix,
-				DarkWizardSitActionIndex,
-				idleAction,
-				walkAction,
-				"_Sit",
-				_sitControllers,
-				meshInstance);
-
+				root, partBmd, materials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
+				DarkWizardSitActionIndex, idleAction, walkAction, "_Sit", _sitControllers, meshInstance);
 			TryCreateOptionalPoseController(
-				root,
-				partBmd,
-				materials,
-				skeletonBmd,
-				subFrameSamples,
-				animationSyncStartSeconds,
-				prefix,
-				DarkWizardRestActionIndex,
-				idleAction,
-				walkAction,
-				"_Rest",
-				_restControllers,
-				meshInstance);
+				root, partBmd, materials, skeletonBmd, subFrameSamples, animationSyncStartSeconds, prefix,
+				DarkWizardRestActionIndex, idleAction, walkAction, "_Rest", _restControllers, meshInstance);
 
 			hasRenderablePart = true;
 		}
 
-		if (!hasRenderablePart)
+		await RebuildEquipmentAttachmentsAsync(root);
+		UpdateEquipmentAttachmentTransforms();
+		return hasRenderablePart;
+	}
+
+	private async Task<string?> ResolveBodyPartModelPathAsync(string prefix, int partIndex, int classId)
+	{
+		// Reset to the class default first, just like the reference flow before reapplying item visuals.
+		string classPath = BuildPartModelPath(prefix, classId);
+		string resolvedClassPath = await ResolveExistingModelPathAsync(classPath) ?? classPath;
+		if (EquippedArmorSetId < 0 || partIndex < 0 || partIndex >= ArmorGroupsByPart.Length)
+			return resolvedClassPath;
+
+		byte group = ArmorGroupsByPart[partIndex];
+		short id = (short)EquippedArmorSetId;
+		var itemDef = _itemCatalog.Get(group, id);
+		if (itemDef == null || string.IsNullOrWhiteSpace(itemDef.TexturePath))
+			return resolvedClassPath;
+
+		string playerPath = itemDef.TexturePath.Replace("Item/", "Player/", StringComparison.OrdinalIgnoreCase);
+		string? resolvedItemPath = await ResolveExistingModelPathAsync(playerPath)
+			?? await ResolveExistingModelPathAsync(itemDef.TexturePath);
+		return resolvedItemPath ?? resolvedClassPath;
+	}
+
+	private async Task<string?> ResolveExistingModelPathAsync(string relativePath)
+	{
+		if (string.IsNullOrWhiteSpace(relativePath))
+			return null;
+		var bmd = await _modelBuilder.LoadBmdAsync(relativePath, logMissing: false);
+		return bmd != null ? relativePath : null;
+	}
+
+	private async Task<string?> ResolveAttachmentModelPathAsync(string texturePath, int group, int id)
+	{
+		if (string.IsNullOrWhiteSpace(texturePath))
+			return null;
+
+		string normalized = texturePath.Replace("\\", "/");
+		string? resolved = await ResolveExistingModelPathAsync(normalized);
+		if (!string.IsNullOrWhiteSpace(resolved))
+			return resolved;
+
+		// Wing models in some clients are placed under Item/Wing/<file>, while actual data may store them in Item/<file>.
+		if (normalized.Contains("Item/Wing/", StringComparison.OrdinalIgnoreCase))
 		{
-			GD.PrintErr($"[DarkWizard] No class body parts found for class {classId}. Using fallback mesh.");
-			var meshInstance = new MeshInstance3D { Name = "FallbackBody" };
-			root.AddChild(meshInstance);
-			_meshes.Add(meshInstance);
-			ApplyFallbackMesh(meshInstance);
-			_root.Position = spawn;
-			_moveTarget = spawn;
-			_path.Clear();
-			_targetYaw = _root.Rotation.Y;
-			_hasTargetYaw = true;
-			await EnsureMoveTargetMarkerAsync();
-			_onCameraReset?.Invoke();
-			onStatus?.Invoke("DarkWizard class models missing (using fallback).");
+			string flatWingPath = $"Item/{System.IO.Path.GetFileName(normalized)}";
+			resolved = await ResolveExistingModelPathAsync(flatWingPath);
+			if (!string.IsNullOrWhiteSpace(resolved))
+				return resolved;
+		}
+
+		// Generic fallback: try flat Item/<file>.
+		string fileName = System.IO.Path.GetFileName(normalized);
+		if (!string.IsNullOrWhiteSpace(fileName))
+		{
+			string flatItemPath = $"Item/{fileName}";
+			resolved = await ResolveExistingModelPathAsync(flatItemPath);
+			if (!string.IsNullOrWhiteSpace(resolved))
+				return resolved;
+		}
+
+		GD.PrintErr($"[DarkWizard] Attachment model not found for group={group}, id={id}, path={texturePath}");
+		return null;
+	}
+
+	private async Task RebuildEquipmentAttachmentsAsync(Node3D root)
+	{
+		await RebuildSingleAttachmentAsync(root, _leftAttachment, "LeftWeapon", EquippedLeftHandGroup, EquippedLeftHandId);
+		await RebuildSingleAttachmentAsync(root, _rightAttachment, "RightWeapon", EquippedRightHandGroup, EquippedRightHandId);
+		await RebuildSingleAttachmentAsync(root, _wingAttachment, "Wing", 12, EquippedWingId);
+	}
+
+	private async Task RebuildSingleAttachmentAsync(Node3D root, EquipmentAttachmentRuntime runtime, string nodeName, int group, int id)
+	{
+		if (runtime.Pivot != null && GodotObject.IsInstanceValid(runtime.Pivot))
+		{
+			if (runtime.Pivot.GetParent() != null)
+				runtime.Pivot.GetParent().RemoveChild(runtime.Pivot);
+			runtime.Pivot.QueueFree();
+			runtime.Pivot = null;
+			runtime.AnimationController = null;
+			runtime.MeshInstance = null;
+		}
+
+		if (group < 0 || id < 0)
+			return;
+
+		var itemDef = _itemCatalog.Get((byte)group, (short)id);
+		if (itemDef == null || string.IsNullOrWhiteSpace(itemDef.TexturePath))
+			return;
+
+		string? modelPath = await ResolveAttachmentModelPathAsync(itemDef.TexturePath, group, id);
+		if (string.IsNullOrWhiteSpace(modelPath))
+			return;
+
+		BMD? itemBmd = await _modelBuilder.LoadBmdAsync(modelPath, logMissing: false);
+		if (itemBmd == null)
+			return;
+
+		var materials = await _modelBuilder.LoadModelTexturesAsync(modelPath);
+		var pivot = new Node3D { Name = nodeName };
+		var itemMesh = new MeshInstance3D { Name = $"{nodeName}Mesh" };
+		pivot.AddChild(itemMesh);
+		root.AddChild(pivot);
+		runtime.Pivot = pivot;
+		runtime.MeshInstance = itemMesh;
+		ApplyAttachmentLocalOffset(runtime);
+
+		// Wings should keep their own animation (as in reference WingObject), while still
+		// being attached to the player's back bone.
+		bool isWing = group == 12;
+		if (isWing && _modelBuilder.HasAnimatedAction(itemBmd, 0))
+		{
+			var animController = new MuAnimatedMeshController { Name = $"{nodeName}Anim" };
+			pivot.AddChild(animController);
+			animController.Initialize(
+				_modelBuilder,
+				itemBmd,
+				materials,
+				actionIndex: 0,
+				animationSpeed: 4f,
+				subFrameSamples: 8,
+				useRealtimeInterpolation: DarkWizardRealtimeInterpolation);
+			animController.RegisterInstance(itemMesh);
+			animController.SetExternalAnimationEnabled(true);
+			runtime.AnimationController = animController;
 			return;
 		}
 
-		_root.Position = spawn;
-		_moveTarget = spawn;
-		_path.Clear();
-		_targetYaw = _root.Rotation.Y;
-		_hasTargetYaw = true;
-		SetAnimationState(isMoving: false, force: true);
-		await EnsureMoveTargetMarkerAsync();
-		_onCameraReset?.Invoke();
-		GD.Print($"[DarkWizard] Spawned at {spawn}. Parts: {_meshes.Count}, walk controllers: {_walkControllers.Count}");
+		ArrayMesh? mesh = _modelBuilder.BuildMesh(itemBmd, actionIndex: 0, framePos: 0f);
+		if (mesh == null)
+			return;
+		for (int s = 0; s < mesh.GetSurfaceCount() && s < materials.Length; s++)
+		{
+			if (materials[s] != null)
+				mesh.SurfaceSetMaterial(s, materials[s]);
+		}
+		itemMesh.Mesh = mesh;
 	}
 
 	private MuAnimatedMeshController CreateAnimationController(
@@ -663,6 +977,7 @@ public partial class DarkWizardController : Node3D
 		if (isMoving && _specialPose != SpecialPoseMode.None)
 			_specialPose = SpecialPoseMode.None;
 		SetAnimationState(isMoving);
+		UpdateEquipmentAttachmentTransforms();
 	}
 
 	private void SetMoveTargetFromTile(Vector2I tile)
@@ -1029,6 +1344,91 @@ public partial class DarkWizardController : Node3D
 
 			controller.SetExternalAnimationEnabled(useRestPose);
 		}
+	}
+
+	private bool TryGetCurrentAnimationSample(out int actionIndex, out float framePos)
+	{
+		actionIndex = IdleAction;
+		framePos = 0f;
+
+		if (_specialPose == SpecialPoseMode.Sit && TryGetSampleFrom(_sitControllers, out actionIndex, out framePos))
+			return true;
+		if (_specialPose == SpecialPoseMode.Rest && TryGetSampleFrom(_restControllers, out actionIndex, out framePos))
+			return true;
+		if (_moving && TryGetSampleFrom(_walkControllers, out actionIndex, out framePos))
+			return true;
+		return TryGetSampleFrom(_idleControllers, out actionIndex, out framePos);
+	}
+
+	private static bool TryGetSampleFrom(List<MuAnimatedMeshController> controllers, out int actionIndex, out float framePos)
+	{
+		actionIndex = 0;
+		framePos = 0f;
+		for (int i = 0; i < controllers.Count; i++)
+		{
+			var controller = controllers[i];
+			if (controller == null || !GodotObject.IsInstanceValid(controller))
+				continue;
+
+			actionIndex = controller.ActionIndex;
+			framePos = controller.FramePosition;
+			return true;
+		}
+
+		return false;
+	}
+
+	private void UpdateEquipmentAttachmentTransforms()
+	{
+		if (_root == null || !GodotObject.IsInstanceValid(_root) || _skeletonBmd == null)
+			return;
+		if (!TryGetCurrentAnimationSample(out int actionIndex, out float framePos))
+			return;
+
+		UpdateAttachmentTransform(_leftAttachment, actionIndex, framePos);
+		UpdateAttachmentTransform(_rightAttachment, actionIndex, framePos);
+		UpdateAttachmentTransform(_wingAttachment, actionIndex, framePos);
+	}
+
+	private void UpdateAttachmentTransform(EquipmentAttachmentRuntime runtime, int actionIndex, float framePos)
+	{
+		if (runtime.Pivot == null || !GodotObject.IsInstanceValid(runtime.Pivot) || _skeletonBmd == null)
+			return;
+		if (!_modelBuilder.TryGetBoneTransform(_skeletonBmd, actionIndex, framePos, runtime.BoneIndex, out var boneTransform))
+			return;
+
+		runtime.Pivot.Transform = boneTransform;
+		ApplyAttachmentLocalOffset(runtime);
+	}
+
+	private void ApplyAttachmentLocalOffset(EquipmentAttachmentRuntime runtime)
+	{
+		if (runtime.MeshInstance == null || !GodotObject.IsInstanceValid(runtime.MeshInstance))
+			return;
+
+		Vector3 offset;
+		Vector3 rotDeg;
+		if (ReferenceEquals(runtime, _leftAttachment))
+		{
+			offset = LeftHandItemOffset;
+			rotDeg = LeftHandItemRotationDegrees;
+		}
+		else if (ReferenceEquals(runtime, _rightAttachment))
+		{
+			offset = RightHandItemOffset;
+			rotDeg = RightHandItemRotationDegrees;
+		}
+		else
+		{
+			offset = WingItemOffset;
+			rotDeg = WingItemRotationDegrees;
+		}
+
+		runtime.MeshInstance.Position = offset;
+		runtime.MeshInstance.Rotation = new Vector3(
+			Mathf.DegToRad(rotDeg.X),
+			Mathf.DegToRad(rotDeg.Y),
+			Mathf.DegToRad(rotDeg.Z));
 	}
 
 	private bool IsTileWalkable(int x, int y)

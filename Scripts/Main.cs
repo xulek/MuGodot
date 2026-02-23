@@ -13,6 +13,8 @@ namespace MuGodot;
 public partial class Main : Node3D
 {
 	private const float MuToGodotScale = MuConfig.WorldToGodot;
+	private const int UiNoneId = 2_000_000_001;
+	private const int UiArmorClassDefaultId = 2_000_000_002;
 
 	private static readonly Vector3 MonoGameSunDirectionMu = new Vector3(-1f, 0f, -1f).Normalized();
 	private static readonly Vector3 MonoGameTerrainLightDirectionMu = (-MonoGameSunDirectionMu).Normalized();
@@ -67,7 +69,14 @@ public partial class Main : Node3D
 	private ObjectCullingSystem _cullingSystem = null!;
 	private WorldAudioManager? _audioManager;
 	private DarkWizardController _darkWizardController = null!;
+	private CanvasLayer? _uiLayer;
 	private Label? _statusLabel;
+	private OptionButton? _armorOption;
+	private OptionButton? _leftWeaponOption;
+	private OptionButton? _rightWeaponOption;
+	private OptionButton? _wingOption;
+	private SpinBox? _itemLevelSpin;
+	private bool _suppressEquipmentUiEvents;
 	private bool _loading;
 	private float _editorOwnerSyncTimer;
 	private float _editorFxUpdateAccumulator;
@@ -152,22 +161,223 @@ public partial class Main : Node3D
 
 	private void SetupUI()
 	{
-		var canvas = new CanvasLayer { Name = "UI" };
-		AddChild(canvas);
+		_uiLayer = new CanvasLayer { Name = "UI" };
+		AddChild(_uiLayer);
 
 		_statusLabel = new Label();
 		_statusLabel.Position = new Vector2(10, 10);
 		_statusLabel.AddThemeColorOverride("font_color", new Color(1, 1, 1));
 		_statusLabel.AddThemeFontSizeOverride("font_size", 16);
 		_statusLabel.Text = "Loading...";
-		canvas.AddChild(_statusLabel);
+		_uiLayer.AddChild(_statusLabel);
 
 		var helpLabel = new Label();
-		helpLabel.Position = new Vector2(10, 680);
+		helpLabel.SetAnchorsPreset(Control.LayoutPreset.BottomLeft);
+		helpLabel.OffsetLeft = 10;
+		helpLabel.OffsetTop = -28;
 		helpLabel.AddThemeColorOverride("font_color", new Color(1, 1, 0.7f));
 		helpLabel.AddThemeFontSizeOverride("font_size", 14);
-		helpLabel.Text = "LMB: Move DarkWizard | MMB drag: Rotate camera | MMB click: Reset camera | Wheel: Zoom";
-		canvas.AddChild(helpLabel);
+		helpLabel.Text = "LMB: Move | MMB drag: Rotate camera | MMB click: Reset | Wheel: Zoom";
+		_uiLayer.AddChild(helpLabel);
+
+		var panel = new PanelContainer { Name = "EquipmentPanel" };
+		panel.SetAnchorsPreset(Control.LayoutPreset.TopWide);
+		panel.OffsetLeft = 10;
+		panel.OffsetTop = 38;
+		panel.OffsetRight = -10;
+		panel.OffsetBottom = 170;
+		_uiLayer.AddChild(panel);
+
+		var scroll = new ScrollContainer
+		{
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+			SizeFlagsVertical = Control.SizeFlags.ExpandFill
+		};
+		panel.AddChild(scroll);
+
+		var flow = new HFlowContainer
+		{
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+		};
+		flow.AddThemeConstantOverride("h_separation", 10);
+		scroll.AddChild(flow);
+
+		AddEquipmentField(flow, "Armor", out _armorOption);
+		AddEquipmentField(flow, "Left Hand", out _leftWeaponOption);
+		AddEquipmentField(flow, "Right Hand", out _rightWeaponOption);
+		AddEquipmentField(flow, "Wing", out _wingOption);
+		AddItemLevelField(flow);
+
+		_armorOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
+		_leftWeaponOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
+		_rightWeaponOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
+		_wingOption?.Connect("item_selected", Callable.From<long>(OnEquipmentSelectionChanged));
+		_itemLevelSpin?.Connect("value_changed", Callable.From<double>(OnEquipmentLevelChanged));
+	}
+
+	private static void AddEquipmentField(Godot.Container parent, string label, out OptionButton option)
+	{
+		var box = new VBoxContainer
+		{
+			CustomMinimumSize = new Vector2(150, 0)
+		};
+		parent.AddChild(box);
+		box.AddChild(new Label { Text = label });
+		option = new OptionButton();
+		box.AddChild(option);
+	}
+
+	private void AddItemLevelField(Godot.Container parent)
+	{
+		var box = new VBoxContainer
+		{
+			CustomMinimumSize = new Vector2(120, 0)
+		};
+		parent.AddChild(box);
+		box.AddChild(new Label { Text = "Item Level" });
+		_itemLevelSpin = new SpinBox
+		{
+			MinValue = 0,
+			MaxValue = 15,
+			Step = 1,
+			Rounded = true,
+			Value = 13
+		};
+		box.AddChild(_itemLevelSpin);
+	}
+
+	private async Task PopulateEquipmentUiAsync()
+	{
+		if (_armorOption == null || _leftWeaponOption == null || _rightWeaponOption == null || _wingOption == null || _itemLevelSpin == null)
+			return;
+
+		var uiData = await _darkWizardController.GetEquipmentUiDataAsync();
+		_suppressEquipmentUiEvents = true;
+		try
+		{
+			FillArmorOptions(_armorOption, uiData.Armors, uiData.Current.ArmorSetId);
+			FillWeaponOptions(_leftWeaponOption, uiData.Weapons, uiData.Current.LeftHandGroup, uiData.Current.LeftHandId);
+			FillWeaponOptions(_rightWeaponOption, uiData.Weapons, uiData.Current.RightHandGroup, uiData.Current.RightHandId);
+			FillWingOptions(_wingOption, uiData.Wings, uiData.Current.WingId);
+			_itemLevelSpin.Value = uiData.Current.ItemLevel;
+		}
+		finally
+		{
+			_suppressEquipmentUiEvents = false;
+		}
+	}
+
+	private static void FillArmorOptions(OptionButton option, IReadOnlyList<MuItemCatalog.ItemDef> armors, int selectedId)
+	{
+		option.Clear();
+		option.AddItem("Class default", UiArmorClassDefaultId);
+		for (int i = 0; i < armors.Count; i++)
+		{
+			var armor = armors[i];
+			option.AddItem($"{armor.Name} ({armor.Id})", armor.Id);
+		}
+
+		int target = selectedId < 0 ? UiArmorClassDefaultId : selectedId;
+		SelectOptionById(option, target);
+	}
+
+	private static void FillWeaponOptions(OptionButton option, IReadOnlyList<MuItemCatalog.ItemDef> weapons, int selectedGroup, int selectedId)
+	{
+		option.Clear();
+		option.AddItem("None", UiNoneId);
+		for (int i = 0; i < weapons.Count; i++)
+		{
+			var weapon = weapons[i];
+			int key = EncodeItemKey(weapon.Group, weapon.Id);
+			option.AddItem($"[{weapon.Group}] {weapon.Name} ({weapon.Id})", key);
+		}
+
+		int selectedKey = selectedGroup < 0 || selectedId < 0 ? UiNoneId : EncodeItemKey((byte)selectedGroup, (short)selectedId);
+		SelectOptionById(option, selectedKey);
+	}
+
+	private static void FillWingOptions(OptionButton option, IReadOnlyList<MuItemCatalog.ItemDef> wings, int selectedId)
+	{
+		option.Clear();
+		option.AddItem("None", UiNoneId);
+		for (int i = 0; i < wings.Count; i++)
+		{
+			var wing = wings[i];
+			option.AddItem($"{wing.Name} ({wing.Id})", wing.Id);
+		}
+
+		int target = selectedId < 0 ? UiNoneId : selectedId;
+		SelectOptionById(option, target);
+	}
+
+	private static void SelectOptionById(OptionButton option, int targetId)
+	{
+		for (int i = 0; i < option.ItemCount; i++)
+		{
+			if (option.GetItemId(i) != targetId)
+				continue;
+			option.Selected = i;
+			return;
+		}
+
+		option.Selected = 0;
+	}
+
+	private static int EncodeItemKey(byte group, short id)
+	{
+		return (group << 16) | (ushort)id;
+	}
+
+	private static (int Group, int Id) DecodeItemKey(int key)
+	{
+		if (key == UiNoneId || key < 0)
+			return (-1, -1);
+		int group = (key >> 16) & 0xFF;
+		int id = key & 0xFFFF;
+		return (group, id);
+	}
+
+	private void OnEquipmentSelectionChanged(long _selectedIndex)
+	{
+		if (_suppressEquipmentUiEvents)
+			return;
+		_ = ApplyEquipmentFromUiAsync();
+	}
+
+	private void OnEquipmentLevelChanged(double _value)
+	{
+		if (_suppressEquipmentUiEvents)
+			return;
+		_ = ApplyEquipmentFromUiAsync();
+	}
+
+	private async Task ApplyEquipmentFromUiAsync()
+	{
+		if (_armorOption == null || _leftWeaponOption == null || _rightWeaponOption == null || _wingOption == null || _itemLevelSpin == null)
+			return;
+		if (_loading)
+			return;
+
+		int armorId = _armorOption.GetItemId(_armorOption.Selected);
+		int leftKey = _leftWeaponOption.GetItemId(_leftWeaponOption.Selected);
+		int rightKey = _rightWeaponOption.GetItemId(_rightWeaponOption.Selected);
+		int wingId = _wingOption.GetItemId(_wingOption.Selected);
+		if (armorId == UiArmorClassDefaultId)
+			armorId = -1;
+		if (wingId == UiNoneId)
+			wingId = -1;
+		var left = DecodeItemKey(leftKey);
+		var right = DecodeItemKey(rightKey);
+
+		var preset = new DarkWizardController.EquipmentPreset(
+			armorId,
+			(int)_itemLevelSpin.Value,
+			left.Group,
+			left.Id,
+			right.Group,
+			right.Id,
+			wingId);
+		await _darkWizardController.ApplyEquipmentPresetAsync(preset);
 	}
 
 	private async Task LoadWorldAsync(bool loadObjects, bool editorMode)
@@ -252,7 +462,10 @@ public partial class Main : Node3D
 			if (FullObjectOwnershipPassInEditor)
 				ExposeGeneratedNodesInEditor(_objectsRoot);
 			if (!editorMode)
+			{
 				await _darkWizardController.SpawnAsync(_charactersRoot, WorldIndex, UpdateStatus);
+				await PopulateEquipmentUiAsync();
+			}
 
 			_audioManager?.ConfigureForWorld(WorldIndex);
 			EnsureEditorSceneOwnership();
@@ -433,6 +646,11 @@ public partial class Main : Node3D
 		if (@event is InputEventMouseButton mouseButton && mouseButton.Pressed &&
 			mouseButton.ButtonIndex == MouseButton.Left)
 		{
+			// Prevent terrain click-through when interacting with equipment UI.
+			var hoveredControl = GetViewport().GuiGetHoveredControl();
+			if (hoveredControl != null && GodotObject.IsInstanceValid(hoveredControl))
+				return;
+
 			if (_lorenciaInteractionSystem.TryHandleLeftClick(mouseButton.Position))
 				return;
 			_darkWizardController.HandleInput(mouseButton.Position);

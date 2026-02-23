@@ -33,6 +33,8 @@ public partial class MuAnimatedMeshController : Node
     private StandardMaterial3D[] _materials = [];
     private int _actionIndex;
     private ArrayMesh? _realtimeMesh;
+    public int ActionIndex => _actionIndex;
+    public float FramePosition => _framePos;
 
     public void Initialize(
         MuModelBuilder modelBuilder,

@@ -72,6 +72,48 @@ public class MuModelBuilder
         return speed <= 0f ? 1f : speed;
     }
 
+    public bool TryGetBoneTransform(
+        BMD bmd,
+        int actionIndex,
+        float framePos,
+        int boneIndex,
+        out Transform3D transform)
+    {
+        transform = Transform3D.Identity;
+        if (bmd.Bones == null || bmd.Bones.Length == 0)
+            return false;
+        if (boneIndex < 0 || boneIndex >= bmd.Bones.Length)
+            return false;
+
+        var muMatrices = ComputeBoneMatrices(bmd, actionIndex, framePos);
+        if (boneIndex >= muMatrices.Length)
+            return false;
+
+        var m = muMatrices[boneIndex];
+        var oMu = SysVector3.Transform(SysVector3.Zero, m);
+
+        // BuildMesh converts local vertices from MU->Godot:
+        // Godot X <- MU X
+        // Godot Y <- MU Z
+        // Godot Z <- -MU Y
+        // Therefore local Godot basis vectors correspond to MU vectors:
+        // Xg -> (1,0,0), Yg -> (0,0,1), Zg -> (0,-1,0).
+        var xBasisMu = SysVector3.Transform(new SysVector3(1f, 0f, 0f), m);
+        var yBasisMu = SysVector3.Transform(new SysVector3(0f, 0f, 1f), m);
+        var zBasisMu = SysVector3.Transform(new SysVector3(0f, -1f, 0f), m);
+
+        var origin = MuToGodot(oMu);
+        var axisX = MuToGodot(xBasisMu) - origin;
+        var axisY = MuToGodot(yBasisMu) - origin;
+        var axisZ = MuToGodot(zBasisMu) - origin;
+        if (axisX.LengthSquared() <= 0.000001f || axisY.LengthSquared() <= 0.000001f || axisZ.LengthSquared() <= 0.000001f)
+            return false;
+
+        var basis = new Basis(axisX.Normalized(), axisY.Normalized(), axisZ.Normalized()).Orthonormalized();
+        transform = new Transform3D(basis, origin);
+        return true;
+    }
+
     /// <summary>
     /// Convert a BMD model to a Godot ArrayMesh.
     /// Uses the selected action/frame position for bone transforms.
