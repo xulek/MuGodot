@@ -1,0 +1,9 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://Scenes/Main.tscn" id="1_main"]
+[ext_resource type="Script" path="res://Scripts/Networking/OnlineWorldScene.cs" id="2_online"]
+
+[node name="GameScene" type="Node"]
+script = ExtResource("2_online")
+
+[node name="Main" parent="." instance=ExtResource("1_main")]

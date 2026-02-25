@@ -128,6 +128,8 @@ public partial class DarkWizardController : Node3D
 	private AudioStream? _restSound;
 	private float _footstepTimer;
 
+	public event Action<Vector2I, IReadOnlyList<Vector2I>>? MovePathPlanned;
+
 	public void Initialize(MuModelBuilder modelBuilder, MuTerrainBuilder terrainBuilder, Camera3D? camera, string dataPath, Action onCameraReset)
 	{
 		_modelBuilder = modelBuilder;
@@ -209,6 +211,36 @@ public partial class DarkWizardController : Node3D
 		if (_root != null && GodotObject.IsInstanceValid(_root))
 			return _root.GlobalPosition;
 		return _fallbackPosition;
+	}
+
+	public void TeleportToTile(byte tileX, byte tileY, byte rotation = 0)
+	{
+		float x = Mathf.Clamp(tileX + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float y = Mathf.Clamp(tileY + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float height = _terrainBuilder.GetHeightInterpolated(x, y) + DarkWizardHeightOffset;
+		var target = new Vector3(x, height, -y);
+
+		_fallbackPosition = target;
+		if (_root == null || !GodotObject.IsInstanceValid(_root))
+		{
+			return;
+		}
+
+		_root.Position = target;
+		_moveTarget = target;
+		_path.Clear();
+		_moving = false;
+		_specialPose = SpecialPoseMode.None;
+		SetAnimationState(isMoving: false, force: true);
+
+		float yaw = Mathf.DegToRad((rotation & 0x0F) * (360f / 16f)) + Mathf.DegToRad(DarkWizardFacingOffsetDegrees);
+		_targetYaw = yaw;
+		_hasTargetYaw = true;
+
+		var rotationVector = _root.Rotation;
+		rotationVector.Y = yaw;
+		_root.Rotation = rotationVector;
+		UpdateEquipmentAttachmentTransforms();
 	}
 
 	public void HandleInput(Vector2 mousePosition)
@@ -902,6 +934,8 @@ public partial class DarkWizardController : Node3D
 			SetAnimationState(isMoving: false, force: true);
 			return false;
 		}
+
+		MovePathPlanned?.Invoke(startTile, path);
 
 		return true;
 	}
@@ -1613,8 +1647,7 @@ public partial class DarkWizardController : Node3D
 		if (_moveTargetMarker == null || !GodotObject.IsInstanceValid(_moveTargetMarker))
 			return;
 
-		// Equivalent to MonoGame cursor offset (+50,+40,0) at MU scale.
-		_moveTargetMarker.Position = position + new Vector3(0.5f, 0.4f, 0f);
+		_moveTargetMarker.Position = position + new Vector3(0f, 0.4f, 0f);
 		_moveTargetMarker.Visible = true;
 		_moveTargetVisibleMs = MoveTargetDurationMs;
 		ApplyMoveTargetAlpha(1f);

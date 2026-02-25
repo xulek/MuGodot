@@ -1,5 +1,6 @@
 using Godot;
 using MuGodot.Audio;
+using MuGodot.Networking;
 using MuGodot.Objects.Worlds.Lorencia;
 
 namespace MuGodot;
@@ -52,6 +53,10 @@ public partial class Main : Node3D
 	[Export] public float GrassRebuildMoveThreshold { get; set; } = 1.5f;
 	[Export] public bool GrassProgressiveRebuild { get; set; } = true;
 	[Export] public int GrassRebuildTilesPerFrame { get; set; } = 180;
+	[ExportGroup("Debug UI")]
+	[Export] public bool EnableEquipmentDebugUi { get; set; } = true;
+	[Export] public bool ShowEquipmentDebugUiOnStart { get; set; } = false;
+	[Export] public Key EquipmentDebugToggleKey { get; set; } = Key.F10;
 
 	private DirectionalLight3D _sun = null!;
 	private Node3D _terrainRoot = null!;
@@ -71,6 +76,7 @@ public partial class Main : Node3D
 	private DarkWizardController _darkWizardController = null!;
 	private CanvasLayer? _uiLayer;
 	private Label? _statusLabel;
+	private PanelContainer? _equipmentPanel;
 	private OptionButton? _armorOption;
 	private OptionButton? _leftWeaponOption;
 	private OptionButton? _rightWeaponOption;
@@ -140,11 +146,12 @@ public partial class Main : Node3D
 		if (_cullingSystem.GetParent() == null) AddChild(_cullingSystem);
 		_cullingSystem.Initialize(_cameraController.Camera);
 
-		_darkWizardController = GetNodeOrNull<DarkWizardController>("DarkWizardController")
-			?? new DarkWizardController { Name = "DarkWizardController" };
-		if (_darkWizardController.GetParent() == null) AddChild(_darkWizardController);
-		_darkWizardController.Initialize(_modelBuilder, _terrainBuilder, _cameraController.Camera, DataPath, _cameraController.ResetAndUpdate);
-		_ = _lorenciaInteractionSystem.InitializeAsync(_cameraController.Camera, _darkWizardController);
+			_darkWizardController = GetNodeOrNull<DarkWizardController>("DarkWizardController")
+				?? new DarkWizardController { Name = "DarkWizardController" };
+			if (_darkWizardController.GetParent() == null) AddChild(_darkWizardController);
+			_darkWizardController.Initialize(_modelBuilder, _terrainBuilder, _cameraController.Camera, DataPath, _cameraController.ResetAndUpdate);
+			_darkWizardController.MovePathPlanned += OnMovePathPlanned;
+			_ = _lorenciaInteractionSystem.InitializeAsync(_cameraController.Camera, _darkWizardController);
 
 		ApplyEditorPerformanceSettings();
 		EnsureEditorSceneOwnership();
@@ -157,6 +164,7 @@ public partial class Main : Node3D
 		}
 		else
 		{
+			ApplyInitialNetworkWorldIndex();
 			_ = LoadWorldAsync(loadObjects: true, editorMode: false);
 		}
 	}
@@ -183,11 +191,13 @@ public partial class Main : Node3D
 		_uiLayer.AddChild(helpLabel);
 
 		var panel = new PanelContainer { Name = "EquipmentPanel" };
+		_equipmentPanel = panel;
 		panel.SetAnchorsPreset(Control.LayoutPreset.TopWide);
 		panel.OffsetLeft = 10;
 		panel.OffsetTop = 38;
 		panel.OffsetRight = -10;
 		panel.OffsetBottom = 170;
+		panel.Visible = EnableEquipmentDebugUi && ShowEquipmentDebugUiOnStart;
 		_uiLayer.AddChild(panel);
 
 		var scroll = new ScrollContainer
@@ -507,7 +517,17 @@ public partial class Main : Node3D
 				ExposeGeneratedNodesInEditor(_objectsRoot);
 			if (!editorMode)
 			{
+				await ApplySessionCharacterSetupAsync();
 				await _darkWizardController.SpawnAsync(_charactersRoot, WorldIndex, UpdateStatus);
+				if (MuLoginSession.CurrentMapId.HasValue &&
+					MapIdToWorldIndex(MuLoginSession.CurrentMapId.Value) == WorldIndex)
+				{
+					ApplyNetworkHeroPosition(
+						MuLoginSession.CurrentPositionX,
+						MuLoginSession.CurrentPositionY,
+						MuLoginSession.CurrentDirection);
+				}
+
 				await PopulateEquipmentUiAsync();
 			}
 
@@ -654,6 +674,188 @@ public partial class Main : Node3D
 		SetOwnerIfNeeded(_houseOcclusionSystem, editedSceneRoot);
 	}
 
+	private async Task ApplySessionCharacterSetupAsync()
+	{
+		MuCharacterInfo? selected = MuLoginSession.SelectedCharacter;
+		if (selected is null)
+			return;
+
+		MuCharacterSpawnSetup setup = MuCharacterAppearanceDecoder.TryCreateSpawnSetup(selected, out var parsed)
+			? parsed
+			: new MuCharacterSpawnSetup
+			{
+				ClassModelId = MuCharacterAppearanceDecoder.GetClassModelId(selected.Class),
+			};
+
+		_darkWizardController.DarkWizardClassModelId = setup.ClassModelId;
+
+		var preset = new DarkWizardController.EquipmentPreset(
+			setup.ArmorSetId,
+			setup.ItemLevel,
+			setup.IsExcellent,
+			setup.IsAncient,
+			setup.LeftHandGroup,
+			setup.LeftHandId,
+			setup.RightHandGroup,
+			setup.RightHandId,
+			setup.WingId);
+
+		await _darkWizardController.ApplyEquipmentPresetAsync(preset);
+	}
+
+	private void ApplyInitialNetworkWorldIndex()
+	{
+		if (!MuLoginSession.CurrentMapId.HasValue)
+		{
+			return;
+		}
+
+		WorldIndex = MapIdToWorldIndex(MuLoginSession.CurrentMapId.Value);
+	}
+
+	private static int MapIdToWorldIndex(byte mapId)
+	{
+		return Math.Max(1, mapId + 1);
+	}
+
+	public async Task SwitchToNetworkLocationAsync(byte mapId, byte x, byte y, byte direction)
+	{
+		while (_loading)
+		{
+			await Task.Delay(25);
+		}
+
+		int targetWorld = MapIdToWorldIndex(mapId);
+		if (targetWorld != WorldIndex)
+		{
+			WorldIndex = targetWorld;
+			await LoadWorldAsync(loadObjects: true, editorMode: false);
+		}
+
+		ApplyNetworkHeroPosition(x, y, direction);
+	}
+
+	public void ApplyNetworkHeroPosition(byte x, byte y, byte direction)
+	{
+		_darkWizardController.TeleportToTile(x, y, direction);
+	}
+
+	private async void OnMovePathPlanned(Vector2I startTile, IReadOnlyList<Vector2I> path)
+	{
+		if (path.Count == 0)
+		{
+			return;
+		}
+
+		MuNetworkClient network = MuNetworkClient.Instance;
+		if (network.CurrentState != ClientConnectionState.InGame)
+		{
+			return;
+		}
+
+		byte[] directions = BuildWalkDirections(startTile, path);
+		if (directions.Length == 0)
+		{
+			return;
+		}
+
+		byte startX = (byte)Math.Clamp(startTile.X, 0, 255);
+		byte startY = (byte)Math.Clamp(startTile.Y, 0, 255);
+		await network.SendWalkRequestAsync(startX, startY, directions);
+	}
+
+	private static byte[] BuildWalkDirections(Vector2I startTile, IReadOnlyList<Vector2I> path)
+	{
+		if (path.Count == 0)
+		{
+			return Array.Empty<byte>();
+		}
+
+		int maxSteps = Math.Min(path.Count, 15);
+		byte[] directions = new byte[maxSteps];
+		int count = 0;
+		Vector2I current = startTile;
+		for (int i = 0; i < maxSteps; i++)
+		{
+			Vector2I next = path[i];
+			if (!TryGetWalkDirectionCode(current, next, out byte dir))
+			{
+				break;
+			}
+
+			directions[count++] = dir;
+			current = next;
+		}
+
+		if (count == 0)
+		{
+			return Array.Empty<byte>();
+		}
+
+		if (count == directions.Length)
+		{
+			return directions;
+		}
+
+		Array.Resize(ref directions, count);
+		return directions;
+	}
+
+	private static bool TryGetWalkDirectionCode(Vector2I from, Vector2I to, out byte direction)
+	{
+		int dx = to.X - from.X;
+		int dy = to.Y - from.Y;
+		direction = (dx, dy) switch
+		{
+			(-1, 0) => 0,    // W
+			(-1, 1) => 1,    // SW
+			(0, 1) => 2,     // S
+			(1, 1) => 3,     // SE
+			(1, 0) => 4,     // E
+			(1, -1) => 5,    // NE
+			(0, -1) => 6,    // N
+			(-1, -1) => 7,   // NW
+			_ => byte.MaxValue,
+		};
+
+		return direction <= 7;
+	}
+
+	public Node3D? GetCharactersRoot()
+	{
+		return _charactersRoot != null && GodotObject.IsInstanceValid(_charactersRoot)
+			? _charactersRoot
+			: null;
+	}
+
+	public Vector3 NetworkTileToWorld(byte tileX, byte tileY, float heightOffset = 0f)
+	{
+		float x = Mathf.Clamp(tileX + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float y = Mathf.Clamp(tileY + 0.5f, 0f, MuConfig.TerrainSize - 1.001f);
+		float terrainHeight = _terrainBuilder != null ? _terrainBuilder.GetHeightInterpolated(x, y) : 0f;
+		return new Vector3(x, terrainHeight + heightOffset, -y);
+	}
+
+	public void ToggleEquipmentDebugUi()
+	{
+		if (_equipmentPanel == null || !GodotObject.IsInstanceValid(_equipmentPanel) || !EnableEquipmentDebugUi)
+		{
+			return;
+		}
+
+		_equipmentPanel.Visible = !_equipmentPanel.Visible;
+	}
+
+	public void SetEquipmentDebugUiVisible(bool visible)
+	{
+		if (_equipmentPanel == null || !GodotObject.IsInstanceValid(_equipmentPanel) || !EnableEquipmentDebugUi)
+		{
+			return;
+		}
+
+		_equipmentPanel.Visible = visible;
+	}
+
 	private static void SetOwnerIfNeeded(Node? node, Node owner)
 	{
 		if (node == null || !GodotObject.IsInstanceValid(node) || node == owner || node.Owner == owner)
@@ -686,6 +888,15 @@ public partial class Main : Node3D
 	{
 		if (Engine.IsEditorHint())
 			return;
+
+		if (@event is InputEventKey keyEvent &&
+			keyEvent.Pressed &&
+			!keyEvent.Echo &&
+			keyEvent.Keycode == EquipmentDebugToggleKey)
+		{
+			ToggleEquipmentDebugUi();
+			return;
+		}
 
 		if (@event is InputEventMouseButton mouseButton && mouseButton.Pressed &&
 			mouseButton.ButtonIndex == MouseButton.Left)
@@ -776,6 +987,10 @@ public partial class Main : Node3D
 		_ambientManager?.Clear();
 		_houseOcclusionSystem?.ResetToOpaque();
 		LorenciaFireEmitter.ResetSharedAssetsForReload();
+		if (_darkWizardController != null && GodotObject.IsInstanceValid(_darkWizardController))
+		{
+			_darkWizardController.MovePathPlanned -= OnMovePathPlanned;
+		}
 		if (_charactersRoot != null && GodotObject.IsInstanceValid(_charactersRoot))
 			ClearChildren(_charactersRoot);
 		_darkWizardController?.Reset();
